@@ -1,0 +1,5575 @@
+--
+-- PostgreSQL database dump
+--
+
+-- Dumped from database version 9.5.3
+-- Dumped by pg_dump version 9.5.3
+
+-- Started on 2022-12-20 06:56:22
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SET check_function_bodies = false;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- TOC entry 1 (class 3079 OID 12355)
+-- Name: plpgsql; Type: EXTENSION; Schema: -; Owner: 
+--
+
+CREATE EXTENSION IF NOT EXISTS plpgsql WITH SCHEMA pg_catalog;
+
+
+--
+-- TOC entry 2684 (class 0 OID 0)
+-- Dependencies: 1
+-- Name: EXTENSION plpgsql; Type: COMMENT; Schema: -; Owner: 
+--
+
+COMMENT ON EXTENSION plpgsql IS 'PL/pgSQL procedural language';
+
+
+SET search_path = public, pg_catalog;
+
+--
+-- TOC entry 252 (class 1255 OID 63332)
+-- Name: ajustes_stock(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION ajustes_stock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		UPDATE ref_stock SET st_cantidad = st_cantidad - new.cantidad
+		WHERE pro_cod = new.pro_cod AND id_depo = new.id_depo;
+		RETURN new;
+	END IF;
+	RETURN new;
+END
+$$;
+
+
+ALTER FUNCTION public.ajustes_stock() OWNER TO postgres;
+
+--
+-- TOC entry 253 (class 1255 OID 63333)
+-- Name: compras_c_ctaspagar(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION compras_c_ctaspagar() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare --declaracion de variables
+cta integer;
+contador integer;
+vto date;
+mcuota numeric (12,0); --MONTO CUOTAS
+intervalo integer;
+cod integer;
+
+begin 
+IF TG_OP = 'UPDATE' then
+	IF NEW.com_estado = 'CONFIRMADO' then
+
+	vto = new.com_fecha; --definimos vencimiento en fecha actual
+	contador = 1; --contador de cuotas
+	intervalo = 30; --intervalo de cuotas por defecto 30 dias
+	mcuota = new.com_total/new.com_can_cuota; --dividimos el total de la venta por la cantidad de cuotas 
+
+--consultamos la tabla ctas para ver si existen cuentas generadas
+SELECT count(id_compra) as codigo into cod from ctas_pagar where id_compra=new.id_compra;
+	if cod = 0 then --si la consulta devuelve 0 significa que no existe y realiza el recorrido
+
+--IF (new.ven_condicion = 'CREDITO' AND new.ven_estado = 'ACTIVO') THEN 
+
+	WHILE contador <= new.com_can_cuota loop --recorrido
+		select coalesce (max(id_cuenta),0)+ 1 into cta from ctas_pagar; --calculamos el ultimo numero
+		--de codigo de la tabla ctas_cobrar
+		vto = vto + (intervalo||' days ')::interval; --le sumamos el intervalo a la fecha actual
+	
+		INSERT INTO ctas_pagar VALUES (cta,new.id_compra,vto,mcuota,'ACTIVO',new.com_can_cuota,mcuota);
+		contador =contador + 1; --contador de cuotas
+
+	end loop;
+
+	else -- si la cuenta ya existe solo actualizara el monto de lacuenta
+	update ctas_pagar set cta_importe = mcuota where id_compra = old.id_compra;
+
+return new;
+END IF;
+END IF;
+END IF;
+return null;
+end; 
+$$;
+
+
+ALTER FUNCTION public.compras_c_ctaspagar() OWNER TO postgres;
+
+--
+-- TOC entry 266 (class 1255 OID 63334)
+-- Name: compras_iva(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION compras_iva() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		UPDATE compras SET com_totaliva = com_totaliva + new.iva5 + new.iva10 + new.exentas
+		WHERE id_compra = new.id_compra;
+		RETURN new;
+	END IF;
+	IF TG_OP = 'DELETE' THEN
+		UPDATE compras SET com_totaliva = com_totaliva - old.iva5 - old.iva10 - old.exentas
+		WHERE id_compra = old.id_compra;
+		RETURN new;
+	END IF;
+	RETURN new;
+END
+$$;
+
+
+ALTER FUNCTION public.compras_iva() OWNER TO postgres;
+
+--
+-- TOC entry 267 (class 1255 OID 63335)
+-- Name: compras_stock(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION compras_stock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE matriz RECORD;
+	vari record;
+	
+BEGIN 
+	IF TG_OP = 'UPDATE' THEN  
+		IF (new.com_estado = 'ANULADO' AND old.com_estado = 'CONFIRMADO')THEN
+			FOR matriz IN SELECT pro_cod,id_depo,cantidad FROM compras_detalle WHERE id_compra = new.id_compra LOOP
+					UPDATE ref_stock SET st_cantidad = st_cantidad - matriz.cantidad WHERE pro_cod = matriz.pro_cod AND id_depo = matriz.id_depo;
+			END LOOP;
+			RETURN new;
+		ELSE
+			IF (new.com_estado = 'CONFIRMADO' AND old.com_estado = 'ACTIVO')THEN
+				FOR matriz IN SELECT pro_cod,id_depo,cantidad FROM compras_detalle WHERE id_compra = new.id_compra LOOP
+					PERFORM * FROM ref_stock WHERE pro_cod = matriz.pro_cod AND id_depo = matriz.id_depo;
+					IF FOUND THEN
+						UPDATE ref_stock SET st_cantidad = st_cantidad + matriz.cantidad WHERE pro_cod = matriz.pro_cod AND id_depo = matriz.id_depo;
+					ELSE
+						INSERT INTO ref_stock VALUES(matriz.pro_cod,matriz.id_depo,matriz.cantidad);
+					END IF; 
+				END LOOP;
+				return new;
+				
+			ELSE
+				RETURN NULL;
+			END IF;
+		END IF;
+	END IF;
+	
+	
+END
+$$;
+
+
+ALTER FUNCTION public.compras_stock() OWNER TO postgres;
+
+--
+-- TOC entry 268 (class 1255 OID 63336)
+-- Name: compras_total(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION compras_total() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		UPDATE compras SET com_total = com_total + new.subtotal
+		WHERE id_compra = new.id_compra;
+		RETURN new;
+	END IF;
+	IF TG_OP = 'DELETE' THEN
+		UPDATE compras SET com_total = com_total - old.subtotal
+		WHERE id_compra = old.id_compra;
+		RETURN new;
+	END IF;
+	RETURN new;
+END
+$$;
+
+
+ALTER FUNCTION public.compras_total() OWNER TO postgres;
+
+--
+-- TOC entry 269 (class 1255 OID 63337)
+-- Name: nota_credito_iva(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION nota_credito_iva() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		UPDATE nota_de_credito SET btc_totiva = btc_totiva + new.iva5 + new.iva10 + new.exentas
+		WHERE cod_notc = new.cod_notc;
+		RETURN new;
+	END IF;
+	IF TG_OP = 'DELETE' THEN
+		UPDATE nota_de_credito SET btc_totiva = btc_totiva - old.iva5 - old.iva10 - old.exentas
+		WHERE cod_notc = old.cod_notc;
+		RETURN new;
+	END IF;
+	RETURN new;
+END
+$$;
+
+
+ALTER FUNCTION public.nota_credito_iva() OWNER TO postgres;
+
+--
+-- TOC entry 270 (class 1255 OID 63338)
+-- Name: nota_credito_stock(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION nota_credito_stock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE matriz RECORD;
+BEGIN
+	IF TG_OP = 'UPDATE' THEN
+		----VENTAS SERIA AL REVES CONFIRMADO A ANULADO
+		IF(new.estado = 'ANULADO' AND old.estado = 'CONFIRMADO')THEN
+		FOR matriz IN SELECT * FROM detalle_credito WHERE cod_notc = new.cod_notc LOOP
+			UPDATE ref_stock SET st_cantidad = st_cantidad + matriz.cantidad WHERE pro_cod = matriz.pro_cod AND id_depo = matriz.id_depo;
+		END LOOP;
+		RETURN new;
+	ELSE
+		IF(new.estado = 'CONFIRMADO' AND old.estado = 'ACTIVO')THEN
+			FOR matriz IN SELECT * FROM detalle_credito WHERE cod_notc = new.cod_notc LOOP
+			UPDATE ref_stock SET st_cantidad = st_cantidad - matriz.cantidad WHERE pro_cod = matriz.pro_cod AND id_depo = matriz.id_depo;
+			END LOOP;
+			RETURN new;
+		ELSE
+			RETURN NULL;
+		END IF;
+	END IF;
+END IF;	
+END
+$$;
+
+
+ALTER FUNCTION public.nota_credito_stock() OWNER TO postgres;
+
+--
+-- TOC entry 271 (class 1255 OID 63339)
+-- Name: nota_credito_total(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION nota_credito_total() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		UPDATE nota_de_credito SET btc_monto = btc_monto + new.subtotal
+		WHERE cod_notc = new.cod_notc;
+		RETURN new;
+	END IF;
+	IF TG_OP = 'DELETE' THEN
+		UPDATE nota_de_credito SET btc_monto = btc_monto - old.subtotal
+		WHERE cod_notc = old.cod_notc;
+		RETURN new;
+	END IF;
+	RETURN new;
+END
+$$;
+
+
+ALTER FUNCTION public.nota_credito_total() OWNER TO postgres;
+
+--
+-- TOC entry 272 (class 1255 OID 63340)
+-- Name: nota_debito_iva(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION nota_debito_iva() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		UPDATE nota_debito SET total_iva = total_iva + new.iva5 + new.iva10 + new.exentas
+		WHERE id_debito = new.id_debito;
+		RETURN new;
+	END IF;
+	IF TG_OP = 'DELETE' THEN
+		UPDATE nota_debito SET total_iva = total_iva - old.iva5 - old.iva10 - old.exentas
+		WHERE id_debito = old.id_debito;
+		RETURN new;
+	END IF;
+	RETURN new;
+END
+$$;
+
+
+ALTER FUNCTION public.nota_debito_iva() OWNER TO postgres;
+
+--
+-- TOC entry 273 (class 1255 OID 63341)
+-- Name: nota_debito_total(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION nota_debito_total() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		UPDATE nota_debito SET monto = monto + new.subtotal
+		WHERE id_debito = new.id_debito;
+		RETURN new;
+	END IF;
+	IF TG_OP = 'DELETE' THEN
+		UPDATE nota_debito SET monto = monto - old.subtotal
+		WHERE id_debito = old.id_debito;
+		RETURN new;
+	END IF;
+	RETURN new;
+END
+$$;
+
+
+ALTER FUNCTION public.nota_debito_total() OWNER TO postgres;
+
+--
+-- TOC entry 274 (class 1255 OID 63342)
+-- Name: orden_total(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION orden_total() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		UPDATE orden_de_compra SET totalo = totalo + new.subtotal
+		WHERE nro_orden = new.nro_orden;
+		RETURN new;
+	END IF;
+	IF TG_OP = 'DELETE' THEN
+		UPDATE orden_de_compra SET totalo = totalo - old.subtotal
+		WHERE nro_orden = old.nro_orden;
+		RETURN new;
+	END IF;
+	RETURN new;
+END
+$$;
+
+
+ALTER FUNCTION public.orden_total() OWNER TO postgres;
+
+--
+-- TOC entry 275 (class 1255 OID 63343)
+-- Name: remision_stock(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION remision_stock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE matriz RECORD;
+BEGIN 
+	IF TG_OP = 'UPDATE' THEN  
+		IF (new.estado = 'ANULADO' AND old.estado = 'CONFIRMADO')THEN
+			FOR matriz IN SELECT * FROM remision_ndetalle WHERE id_remision = new.id_remision LOOP
+				UPDATE ref_stock SET st_cantidad = st_cantidad + matriz.cantidad WHERE pro_cod = matriz.pro_cod AND id_depo = matriz.id_depo;
+			END LOOP;
+			RETURN new;
+		ELSE
+			IF (new.estado = 'CONFIRMADO' AND old.estado = 'ACTIVO')THEN
+				FOR matriz IN SELECT * FROM remision_ndetalle WHERE id_remision = new.id_remision LOOP
+					UPDATE ref_stock SET st_cantidad = st_cantidad - matriz.cantidad WHERE pro_cod = matriz.pro_cod AND id_depo = matriz.id_depo;
+				END LOOP;
+				RETURN new;
+			ELSE
+				IF (new.estado = 'TERMINADO' AND old.estado = 'CONFIRMADO')THEN
+				
+					FOR matriz IN SELECT * FROM remision_ndetalle WHERE id_remision = new.id_remision LOOP
+					PERFORM * FROM ref_stock WHERE pro_cod = matriz.pro_cod AND id_depo = matriz.cod_depo_destino;
+					IF FOUND THEN
+						UPDATE ref_stock SET st_cantidad = st_cantidad + matriz.cantidad 
+						WHERE pro_cod = matriz.pro_cod AND id_depo = matriz.cod_depo_destino;
+					ELSE
+						INSERT INTO ref_stock VALUES(matriz.pro_cod,matriz.cod_depo_destino,matriz.cantidad);
+					END IF;
+					END LOOP;
+					RETURN new;
+				ELSE
+					RETURN NULL;
+				END IF;
+			END IF;
+		END IF;
+	END IF;
+END
+$$;
+
+
+ALTER FUNCTION public.remision_stock() OWNER TO postgres;
+
+--
+-- TOC entry 276 (class 1255 OID 63344)
+-- Name: sp_ajuste(integer, integer, timestamp without time zone, integer, integer, integer, integer, numeric); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ajuste(voperacion integer, vidajuste integer, vfecha timestamp without time zone, vajuste integer, vdeposito integer, vproducto integer, vusuario integer, vcantidad numeric) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		stock INTEGER;
+	BEGIN
+		CASE voperacion
+			WHEN 1 THEN
+				SELECT st_cantidad INTO stock FROM ref_stock WHERE pro_cod = vproducto AND id_depo = vdeposito;
+				IF (stock >= vcantidad) THEN
+					INSERT INTO ajustes(id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (vidajuste, vdeposito, vajuste, vusuario, vproducto, vfecha, vcantidad, 'AJUSTADO');
+					mensaje = 'NOTICIA_/_AJUSTE REALIZADO CON EXITO*ajuste_index';
+				ELSE 
+					mensaje = 'ERROR_/_LA CANTIDAD AJUSTADA SUPERA A LA CANTIDAD DEL STOCK*ajuste_index';
+
+				END IF;
+			
+			END CASE;
+			RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ajuste(voperacion integer, vidajuste integer, vfecha timestamp without time zone, vajuste integer, vdeposito integer, vproducto integer, vusuario integer, vcantidad numeric) OWNER TO postgres;
+
+--
+-- TOC entry 277 (class 1255 OID 63345)
+-- Name: sp_compras(integer, integer, integer, integer, integer, character varying, integer, date, character varying, integer, integer, timestamp without time zone, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_compras(operacion integer, vidcompra integer, vsucursal integer, vusuario integer, vproveedor integer, vnrofactura character varying, vtimbrado integer, vfecha date, vcondicion character varying, vcanticuo integer, vintervalo integer, vvalidez timestamp without time zone, vordenes integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		cangrego record;
+		ultimo INTEGER;
+		det record;
+		crustaceo integer;
+		marmota integer;
+		com record;
+		ultimolibro integer;
+		libro record;
+		anulacion integer;
+	BEGIN
+		IF operacion = 1 THEN
+				IF (vordenes>0) THEN
+					SELECT id_compra INTO crustaceo FROM compras WHERE nro_orden = vordenes;
+					UPDATE orden_de_compra SET estado = 'EN USO' WHERE nro_orden = crustaceo;
+					SELECT prv_cod INTO marmota FROM orden_de_compra WHERE nro_orden = vordenes;
+					--Cargar la cabecera
+					SELECT COALESCE(MAX(id_compra),0)+1 INTO ultimo FROM compras;
+					INSERT INTO compras VALUES(ultimo,vusuario,marmota,vsucursal,vfecha,vnrofactura,vtimbrado,vcanticuo,0,0,'ACTIVO',vcondicion,vintervalo,0,vvalidez,vordenes);
+					mensaje = 'NOTICIA_/_AGREGADO CON EXITO*compras_index';
+					--modificar el estado del presupuesto
+					UPDATE orden_de_compra SET estado = 'EN USO' WHERE nro_orden = vordenes;
+					---CARGAR DETALLE 
+					PERFORM * FROM detalle_orden WHERE nro_orden = vordenes;
+					IF FOUND THEN 
+					FOR det IN SELECT * FROM detalle_orden WHERE nro_orden=vordenes
+					LOOP 
+					INSERT INTO compras_detalle VALUES (ultimo,det.pro_cod,det.id_depo,det.cantidad,det.precioc,det.subtotal,det.iva5,det.iva10,det.exentas); 
+					END LOOP;
+					END IF;
+					--CARGAR EL TOTAL DE ORDEN 
+					/*PERFORM * FROM detalle_orden WHERE nro_orden = vordenes;
+					IF FOUND THEN
+						UPDATE compras SET com_total = (select sum(subtotal) from detalle_orden where nro_orden = vordenes),
+						com_totaliva = (select sum(iva5+iva10) from detalle_orden where nro_orden = vordenes)
+						WHERE id_compra = ultimo;
+					ELSE
+						UPDATE compras SET com_total = 0 WHERE  id_compra = ultimo; 
+						UPDATE compras SET com_totaliva = 0 WHERE  id_compra = ultimo;
+					END IF;*/
+				ELSE
+					SELECT COALESCE(MAX(id_compra),0)+1 INTO ultimo FROM compras;
+					INSERT INTO compras
+					VALUES(ultimo, vusuario, vproveedor,vsucursal,vfecha,vnrofactura,vtimbrado,vcanticuo,0,0,'ACTIVO',vcondicion,vintervalo,0,vvalidez);
+					mensaje = 'NOTICIA_/_SE HA REGISTRADO LA COMPRA CON EXITO*compras_index';
+				END IF;
+				
+		END IF;
+			IF operacion = 2 THEN
+			UPDATE compras SET com_estado = 'ANULADO' WHERE id_compra = vidcompra;
+			SELECT nro_orden INTO anulacion FROM compras WHERE id_compra = vidcompra;
+			UPDATE orden_de_compra SET estado = 'ACTIVO' WHERE nro_orden = anulacion;
+			mensaje = 'NOTICIA_/_SE HA ANULADO CON EXITO*compras_index';
+		END IF;
+		IF operacion = 3 THEN
+			PERFORM * FROM compras  WHERE id_compra = vidcompra;
+			IF FOUND THEN 
+				PERFORM * FROM compras  WHERE id_compra = vidcompra AND com_estado ='ACTIVO';
+				IF FOUND THEN 
+					UPDATE compras SET com_estado = 'CONFIRMADO' WHERE id_compra = vidcompra;
+					mensaje = 'NOTICIA_/_COMPRA CONFIRMADA*compras_index';
+				ELSE 
+					mensaje = 'ERROR_/_DEBE CARGAR DETALLES EN LA COMPRA*compras_index';
+				END IF;
+				---INSERTAR AL LIBRO DE COMPRAS
+				SELECT * INTO com FROM compras WHERE id_compra = vidcompra;
+				SELECT COALESCE (MAX(id_libro),0)+1 INTO ultimolibro FROM libro_de_compra;
+				SELECT * INTO libro FROM compras_detalle WHERE id_compra = vidcompra;
+				INSERT INTO libro_de_compra VALUES(ultimolibro,vidcompra,com.com_nro_factura,com.prv_cod,libro.iva5,libro.iva10,libro.exentas,com.com_total,'ACTIVO');
+			END IF;
+			
+		END IF;			
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_compras(operacion integer, vidcompra integer, vsucursal integer, vusuario integer, vproveedor integer, vnrofactura character varying, vtimbrado integer, vfecha date, vcondicion character varying, vcanticuo integer, vintervalo integer, vvalidez timestamp without time zone, vordenes integer) OWNER TO postgres;
+
+--
+-- TOC entry 278 (class 1255 OID 63346)
+-- Name: sp_compras_detalle(integer, integer, integer, integer, integer, numeric, numeric); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_compras_detalle(voperacion integer, vidcompra integer, vdeposito integer, vproducto integer, vcantidad integer, vprecio numeric, vsubtotal numeric) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+		vsubtotal NUMERIC;
+		viva5 INTEGER;
+		viva10 INTEGER;
+		vexentas INTEGER;
+		habilitar varchar;
+	BEGIN
+
+
+		IF voperacion = 1 THEN
+				PERFORM * FROM compras_detalle WHERE pro_cod = vproducto AND id_depo = vdeposito AND id_compra = vidcompra;
+				IF FOUND THEN
+					mensaje = 'ERROR_/_YA EXISTE ESTE PRODUCTO EN EL DETALLE';
+				ELSE
+					vsubtotal = vcantidad * vprecio;
+					PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 1;
+					IF FOUND THEN
+						viva5 = round(vprecio / 21);
+					ELSE
+						viva5 = 0;
+					END IF;
+					PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 2;
+					IF FOUND THEN
+						viva10 = round(vprecio / 11);
+					ELSE
+						viva10 = 0;
+					END IF;
+					IF viva5 = 0 AND viva10 = 0 THEN
+						vexentas = vprecio;
+					ELSE
+						vexentas = 0;
+					END IF; 
+					INSERT INTO compras_detalle VALUES(vidcompra, vproducto, vdeposito, vcantidad, vprecio, vsubtotal,
+					viva5, viva10, vexentas, 'ACTIVO');
+					mensaje = 'NOTICIA_/_DETALLE CARGADO CON EXITO';
+				END IF;  
+		ELSE
+			mensaje='ERROR_/_NO EXISTE EL PRODUCTO EN STOCK';
+		END IF;
+		IF voperacion = 2 THEN
+			DELETE FROM compras_detalle WHERE pro_cod = vproducto AND id_depo = vdeposito AND id_compra = vidcompra;
+			mensaje = 'NOTICIA_/_SE HA QUITADO EL PRODUCTO DEL DETALLE';
+		END IF;
+		IF voperacion = 5 THEN
+			--permite cargar el iva de acuerdo al producto y las modificaciones de la cantidad si fuese necesario
+			vsubtotal = vcantidad * vprecio;
+			PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 1;
+				IF FOUND THEN
+					viva5 = round(vsubtotal / 21);
+				ELSE
+					viva5 = 0;
+				END IF;
+				PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 2;
+				IF FOUND THEN
+					viva10 = round (vsubtotal / 21);
+				ELSE
+					viva10 = 0;
+				END IF;
+				IF viva5 = 0 AND viva10 = 0 THEN 
+					vexentas = vsubtotal;
+				ELSE 
+					vexentas = 0;
+				END IF;
+			--MODIFICA EN LA COMPRA DETALLE
+			UPDATE compras_detalle SET precio_unit = vprecio, subtotal = vsubtotal, cantidad = vcantidad, iva5 = viva5, iva10 = viva10, exentas=vexentas 
+			WHERE id_compra = vidcompra AND pro_cod = vproducto AND id_depo = vdeposito ;
+			--MODIFICA EN LA ORDEN DE COMPRAS
+			UPDATE detalle_orden SET precioc = vprecio, subtotal = vsubtotal, cantidad = vcantidad, iva5 = viva5, iva10 = viva10, exentas=vexentas 
+			WHERE nro_orden =(select nro_orden FROM compras WHERE id_compra = vidcompra) AND pro_cod = vproducto AND id_depo = vdeposito ;
+			mensaje = 'NOTICIA_/_MODIFICADO CON EXITO';
+			PERFORM * FROM orden_de_compra WHERE nro_orden = (SELECT nro_orden FROM compras WHERE id_compra = vidcompra) AND (id_presu > 0);
+			IF FOUND THEN 
+			UPDATE detalle_presupuesto SET cantidad = vcantidad WHERE id_presu = (SELECT id_presu FROM orden_de_compra WHERE nro_orden = (SELECT nro_orden FROM compras WHERE id_compra = vidcompra));
+			
+			END IF;
+		END IF;	
+		return mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_compras_detalle(voperacion integer, vidcompra integer, vdeposito integer, vproducto integer, vcantidad integer, vprecio numeric, vsubtotal numeric) OWNER TO postgres;
+
+--
+-- TOC entry 279 (class 1255 OID 63347)
+-- Name: sp_compras_pedidos(integer, integer, integer, date, character varying, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_compras_pedidos(operacion integer, vidpedido integer, vusuario integer, vfecha date, vdescri character varying, vestado character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF operacion = 1 THEN
+			PERFORM * FROM compras_pedidos  WHERE descri  = upper(vdescri);
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE PEDIDO';
+			ELSE
+				SELECT COALESCE(MAX(id_pedido),0)+1 INTO ultimo FROM compras_pedidos;
+				INSERT INTO compras_pedidos(id_pedido, usu_cod, fechac, descri, estado)
+				VALUES(ultimo, vusuario, vfecha, upper(vdescri), upper(vestado));
+				mensaje = 'NOTICIA_/_PEDIDO AGREGADO CON EXITO';
+			END IF;  
+		END IF;
+			IF operacion = 2 THEN
+				PERFORM * FROM compras_pedidos WHERE descri = upper(vdescri) AND id_pedido=(vidpedido);
+				IF FOUND THEN
+					mensaje = 'ERROR_/_YA EXISTE ESE PEDIDO CON ESA OBSERVACION ';
+				ELSE
+					UPDATE compras_pedidos SET descri = upper(vdescri) WHERE id_pedido = vidpedido; 
+					mensaje = 'NOTICIA_/_PEDIDO MODIFICADO EXITOSAMENTE';
+
+				END IF;	
+			END IF;
+			---CONFIRMAR PEDIDO SOLO SI TIENE DETALLES CARGADOS
+			IF operacion = 3 THEN
+				PERFORM * FROM compras_pedidos_detalle WHERE  id_pedido= vidpedido;
+				IF FOUND THEN
+					UPDATE compras_pedidos SET estado = 'CONFIRMADO' WHERE id_pedido = vidpedido;
+					mensaje = 'NOTICIA_/_PEDIDO CONFIRMADO ';
+				ELSE
+					mensaje = 'ERROR_/_DEBE CARGAR DETALLES EN EL PEDIDO';
+
+				END IF;	
+			END IF;
+			---ANULAR PEDIDO SOLO SI PEDIDO ESTA CONFIRMADO
+				IF operacion = 4 THEN
+				PERFORM * FROM compras_pedidos WHERE id_pedido=vidpedido AND estado='CONFIRMADO';
+				IF FOUND THEN
+					UPDATE compras_pedidos SET estado = 'ANULADO' WHERE id_pedido = vidpedido; 
+					mensaje = 'NOTICIA_/_PEDIDO ANULADO';
+				ELSE
+					mensaje = 'ERROR_/_EL PEDIDO NO ESTA CONFIRMADO';
+
+				END IF;	
+			END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_compras_pedidos(operacion integer, vidpedido integer, vusuario integer, vfecha date, vdescri character varying, vestado character varying) OWNER TO postgres;
+
+--
+-- TOC entry 280 (class 1255 OID 63348)
+-- Name: sp_compras_pedidos_detalle(integer, integer, integer, integer, integer, numeric); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_compras_pedidos_detalle(voperacion integer, vidpedido integer, vdeposito integer, vproducto integer, vcantidad integer, vprecio numeric) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+		vsubtotal NUMERIC;
+		viva5 INTEGER;
+		viva10 INTEGER;
+		vexentas INTEGER;
+	BEGIN
+		IF voperacion = 1 THEN
+			PERFORM * FROM compras_pedidos_detalle  WHERE pro_cod = vproducto AND id_depo = vdeposito AND id_pedido = vidpedido;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE PRODUCTO EN EL DETALLE';
+			ELSE
+			
+				vsubtotal = vcantidad * vprecio;
+				PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 1;
+				IF FOUND THEN 
+					viva5 = round(vprecio/21);
+				ELSE 
+					viva5 = 0;
+				END IF;
+				PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp =2;
+				IF FOUND THEN 
+					viva10 = round(vprecio/21);
+				ELSE 
+					viva10= 0;
+				END IF;
+				IF viva5 = 0 AND viva10 = 0 THEN 
+					vexentas = vprecio;
+				ELSE 
+					vexentas = 0;
+				END IF;					
+				INSERT INTO compras_pedidos_detalle(id_pedido, id_depo, pro_cod, cantidad, precio_unit, subtotal, iva5, iva10, exentas)
+				VALUES(vidpedido, vdeposito, vproducto, vcantidad, vprecio, vsubtotal, viva5, viva10, vexentas);
+				mensaje = 'NOTICIA_/_PEDIDO AGREGADO CON EXITO';
+			END IF;  
+		END IF;
+		IF voperacion = 2 THEN
+			DELETE FROM compras_pedidos_detalle WHERE pro_cod = vproducto AND id_depo = vdeposito AND id_pedido = vidpedido;
+			mensaje = 'NOTICIA_/_SE HA QUITADO EL PRODUCTO DEL DETALLE'; 
+		END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_compras_pedidos_detalle(voperacion integer, vidpedido integer, vdeposito integer, vproducto integer, vcantidad integer, vprecio numeric) OWNER TO postgres;
+
+--
+-- TOC entry 281 (class 1255 OID 63349)
+-- Name: sp_nota_credito(integer, integer, timestamp without time zone, timestamp without time zone, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_nota_credito(voperacion integer, vidcredito integer, vfechasis timestamp without time zone, vfechareci timestamp without time zone, vcompra integer, vmotivo integer, vusuario integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+		nota record;
+		prov INTEGER;
+	BEGIN
+		IF voperacion = 1 THEN
+			SELECT * INTO nota FROM compras WHERE id_compra = vcompra;
+			--Cargar la cabecera
+			SELECT COALESCE(MAX(cod_notc),0)+1 INTO ultimo FROM nota_de_credito;
+			INSERT INTO nota_de_credito VALUES(ultimo,nota.id_compra,vmotivo,vusuario,nota.prv_cod,vfechasis,0,vfechareci,0,nota.com_nro_factura,nota.com_ntimbrado,nota.tim_vencimiento,'ACTIVO');
+			mensaje = 'NOTICIA_/_AGREGADO CON EXITO';
+				
+					
+		END IF;
+		IF voperacion = 2 THEN
+			UPDATE nota_de_credito SET estado = 'ANULADO' WHERE cod_notc = vidcredito;
+			mensaje = 'NOTICIA_/_SE HA ANULADO CON EXITO';
+		END IF;
+		        
+		IF voperacion = 3 THEN
+			PERFORM * FROM detalle_credito WHERE  cod_notc= vidcredito;
+			IF FOUND THEN
+				UPDATE nota_de_credito SET estado = 'CONFIRMADO' WHERE cod_notc = vidcredito;
+				mensaje = 'NOTICIA_/_NOTA DE DEBITO CONFIRMADO';
+			ELSE
+				mensaje = 'ERROR_/_DEBE CARGAR DETALLES EN LA NOTA DE CREDITO';
+			END IF;	
+		END IF;
+			
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_nota_credito(voperacion integer, vidcredito integer, vfechasis timestamp without time zone, vfechareci timestamp without time zone, vcompra integer, vmotivo integer, vusuario integer) OWNER TO postgres;
+
+--
+-- TOC entry 282 (class 1255 OID 63350)
+-- Name: sp_nota_credito_detalle(integer, integer, integer, integer, integer, numeric); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_nota_credito_detalle(voperacion integer, vidnota integer, vprecio integer, vproducto integer, vdeposito integer, vcantidad numeric) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+		vsubtotal numeric;
+		viva5 INTEGER;
+		viva10 INTEGER;
+		vexentas INTEGER;
+	BEGIN
+		IF voperacion = 1 THEN
+			PERFORM * FROM detalle_credito WHERE pro_cod  = vproducto AND id_depo = vdeposito AND cod_notc = vidnota;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE PRODUCTO EN EL DETALLE';
+			ELSE
+				vsubtotal = vcantidad * vprecio;
+				PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 1;
+				IF FOUND THEN
+					viva5 = round(vsubtotal / 21);
+				ELSE
+					viva5 = 0;
+				END IF;
+				PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 2;
+				IF FOUND THEN
+					viva10 = round (vsubtotal / 21);
+				ELSE
+					viva10 = 0;
+				END IF;
+				IF viva5 = 0 AND viva10 = 0 THEN 
+					vexentas = vsubtotal;
+				ELSE 
+					vexentas = 0;
+				END IF; 
+				
+				INSERT INTO detalle_credito(cod_notc, pro_cod, id_depo, cantidad, precio, subtotal,exentas, iva5, iva10)
+				 VALUES(vidnota, vproducto,vdeposito, vcantidad,vprecio, vsubtotal, vexentas, viva5, viva10);
+				mensaje = 'NOTICIA_/_PRODUCTO AGREGADO CON EXITO';
+			END IF;  
+		END IF;
+		IF voperacion = 2 THEN
+			DELETE FROM detalle_credito WHERE  pro_cod  = vproducto AND id_depo = vdeposito AND cod_notc = vidnota;
+			mensaje = 'NOTICIA_/_SE HA QUITADO EL PRODUCTO DEL DETALLE';    
+		END IF;
+		--CONFIRMAR LA NOTA CREDITO SOLO SI TIENE DETALLE
+		IF voperacion = 3 THEN
+			PERFORM * FROM detalle_credito WHERE cod_notc = vidnota;
+			IF FOUND THEN 
+				UPDATE nota_credito SET estado = 'CONFIRMADO' WHERE cod_notc = vidnota;
+				mensaje = 'NOTICIA_/_NOTA DE CREDITO CONFIRMADO*nota_credito_index'; 
+			ELSE
+				mensaje = 'ERROR_/_DEBE CARGAR DETALLES EN LA NOTA DE CREDITO*nota_credito_index'; 
+			END IF;
+			
+		END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_nota_credito_detalle(voperacion integer, vidnota integer, vprecio integer, vproducto integer, vdeposito integer, vcantidad numeric) OWNER TO postgres;
+
+--
+-- TOC entry 283 (class 1255 OID 63351)
+-- Name: sp_nota_debito(integer, integer, timestamp without time zone, timestamp without time zone, integer, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_nota_debito(voperacion integer, videbito integer, vfechasis timestamp without time zone, vfechareci timestamp without time zone, vcompra integer, vusuario integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+		nota record;
+		prov INTEGER;
+	BEGIN
+		IF voperacion = 1 THEN
+			SELECT * INTO nota FROM compras WHERE id_compra = vcompra;
+			--Cargar la cabecera
+			SELECT COALESCE(MAX(id_debito),0)+1 INTO ultimo FROM nota_debito;
+			INSERT INTO nota_debito VALUES(ultimo,nota.id_compra,vusuario,nota.prv_cod,'ACTIVO',vfechasis,vfechareci,0,0,nota.com_ntimbrado,nota.tim_vencimiento,nota.com_nro_factura);
+			mensaje = 'NOTICIA_/_AGREGADO CON EXITO';
+				
+					
+		END IF;
+		IF voperacion = 2 THEN
+			UPDATE nota_debito SET estado = 'ANULADO' WHERE id_debito = videbito;
+			mensaje = 'NOTICIA_/_SE HA ANULADO CON EXITO';
+		END IF;
+		        
+		IF voperacion = 3 THEN
+			PERFORM * FROM detalle_debito WHERE  id_debito= videbito;
+			IF FOUND THEN
+				UPDATE nota_debito SET estado = 'CONFIRMADO' WHERE id_debito = videbito;
+				mensaje = 'NOTICIA_/_NOTA DE DEBITO CONFIRMADO';
+			ELSE
+				mensaje = 'ERROR_/_DEBE CARGAR DETALLES EN LA NOTA DE DEBITO';
+			END IF;	
+		END IF;
+			
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_nota_debito(voperacion integer, videbito integer, vfechasis timestamp without time zone, vfechareci timestamp without time zone, vcompra integer, vusuario integer) OWNER TO postgres;
+
+--
+-- TOC entry 284 (class 1255 OID 63352)
+-- Name: sp_nota_debito_detalle(integer, integer, integer, numeric, integer, integer, numeric); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_nota_debito_detalle(voperacion integer, vidnota integer, vidmotivo integer, vprecio numeric, vproducto integer, vdeposito integer, vcantidad numeric) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$ 
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+		vsubtotal numeric;
+		viva5 INTEGER;
+		viva10 INTEGER;
+		vexentas INTEGER;
+	BEGIN
+		IF voperacion = 1 THEN
+				IF (vproducto > 0) AND (vdeposito >0) AND (vcantidad > 0) THEN 
+				PERFORM * FROM detalle_debito WHERE id_debito = vidnota AND id_moti = vidmotivo ANd pro_cod  = vproducto AND id_depo = vdeposito; 
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE ESTE REGISTRO EN EL DETALLE';
+				ELSE
+					vsubtotal=vprecio*vcantidad;
+					PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 1;
+					IF FOUND THEN
+						viva5 = round(vsubtotal / 21);
+					ELSE
+						viva5 = 0;
+					END IF;
+					PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 2;
+					IF FOUND THEN
+						viva10 = round (vsubtotal / 21);
+					ELSE
+						viva10 = 0;
+					END IF;
+					IF viva5 = 0 AND viva10 = 0 THEN 
+						vexentas = vsubtotal;
+					ELSE 
+						vexentas = 0;
+					END IF; 
+					INSERT INTO detalle_debito
+					 VALUES(vidnota,vidmotivo,vdeposito,vproducto,viva5,viva10,vexentas,vprecio,vsubtotal,vcantidad);
+					mensaje = 'NOTICIA_/_AGREGADO CON EXITO';
+					
+				END IF;
+			ELSE
+				vsubtotal = vprecio;
+				PERFORM * FROM detalle_debito WHERE id_debito =  vidnota AND id_moti = vidmotivo AND vproducto = 0;
+				IF FOUND THEN
+					mensaje = 'ERROR_/_YA EXISTE ESTE REGISTRO EN EL DETALLE';
+				 ELSE
+					INSERT INTO detalle_debito 
+					VALUES(vidnota,vidmotivo,0,0,0,0,0,vprecio,vsubtotal,0);
+					mensaje = 'NOTICIA_/_AGREGADO CON EXITO';
+				 END  IF;
+			
+			END IF;
+		END IF;
+		IF voperacion = 2 THEN
+			IF (vproducto > 0) AND (vdeposito>0) THEN
+				DELETE FROM detalle_debito WHERE  pro_cod  = vproducto AND id_depo = vdeposito AND id_moti = vidmotivo AND id_debito= vidnota;
+				mensaje = 'NOTICIA_/_SE HA QUITADO EL REGISTRO DEL DETALLE';
+
+			ELSE
+				DELETE FROM detalle_debito WHERE id_moti = vidmotivo AND id_debito= vidnota;
+				mensaje = 'NOTICIA_/_SE HA QUITADO EL REGISTRO DEL DETALLE';
+				
+			END IF;
+		END IF;	
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_nota_debito_detalle(voperacion integer, vidnota integer, vidmotivo integer, vprecio numeric, vproducto integer, vdeposito integer, vcantidad numeric) OWNER TO postgres;
+
+--
+-- TOC entry 285 (class 1255 OID 63353)
+-- Name: sp_nota_remision(integer, integer, timestamp without time zone, character varying, character varying, integer, integer, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_nota_remision(voperacion integer, vidremision integer, vfechatranlado timestamp without time zone, vtimbrado character varying, vmotivo character varying, vusuario integer, vsucsalida integer, vconductor integer, vsucursaldest integer, vvehiculo integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+		DECLARE 
+			mensaje VARCHAR;
+			ultimo INTEGER;
+		BEGIN
+			IF voperacion = 1 THEN
+				PERFORM * FROM nota_remision WHERE id_empleado = vconductor AND estado = 'ACTIVO' OR estado = 'CONFIRMADO';
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_EL CHOFER YA TIENE UN PEDIDO PENDIENTE';
+				ELSE
+					PERFORM * FROM nota_remision WHERE id_vehiculo = vvehiculo AND estado = 'ACTIVO' OR estado = 'CONFIRMADO';
+					IF FOUND THEN
+						mensaje = 'ERROR_/_EL VEHICULO YA SE ENCUENTRA EN USO';
+					ELSE
+						SELECT COALESCE(MAX(id_remision),0)+1 INTO ultimo FROM nota_remision;
+						INSERT INTO nota_remision VALUES(ultimo,vvehiculo,vusuario,vconductor,vtimbrado,vfechatranlado,null,vsucsalida,vsucursaldest,vmotivo,'ACTIVO');
+						mensaje = 'NOTICIA_/_AGREGADO CON EXITO';
+					END IF;
+				END IF;			
+			END IF;
+			IF voperacion = 2 THEN
+				UPDATE nota_remision SET estado = 'ANULADO' WHERE id_remision = vidremision;
+				mensaje = 'NOTICIA_/_SE HA ANULADO CON EXITO';
+			END IF;
+				
+			IF voperacion = 3 THEN
+				PERFORM * FROM remision_ndetalle WHERE  id_remision= vidremision;
+				IF FOUND THEN
+					UPDATE nota_remision SET estado = 'CONFIRMADO' WHERE id_remision = vidremision;
+					mensaje = 'NOTICIA_/_NOTA DE REMISION CONFIRMADO';
+				ELSE
+					mensaje = 'ERROR_/_DEBE CARGAR DETALLES EN LA NOTA DE REMISION';
+				END IF;	
+			END IF;
+			
+			IF voperacion = 4 THEN
+				PERFORM * FROM remision_ndetalle WHERE  id_remision= vidremision;
+				IF FOUND THEN
+					UPDATE nota_remision SET estado = 'TERMINADO' WHERE id_remision = vidremision;
+					UPDATE nota_remision SET fecha_fin_traslado = (select current_timestamp) WHERE id_remision = vidremision;
+					mensaje = 'NOTICIA_/_NOTA DE REMISION TERMINADO';
+				ELSE
+					mensaje = 'ERROR_/_DEBE CARGAR DETALLES EN LA NOTA DE REMISION';
+				END IF;	
+			END IF;
+				
+			RETURN mensaje;
+		END;
+	$$;
+
+
+ALTER FUNCTION public.sp_nota_remision(voperacion integer, vidremision integer, vfechatranlado timestamp without time zone, vtimbrado character varying, vmotivo character varying, vusuario integer, vsucsalida integer, vconductor integer, vsucursaldest integer, vvehiculo integer) OWNER TO postgres;
+
+--
+-- TOC entry 286 (class 1255 OID 63354)
+-- Name: sp_nota_remision_detalle(integer, integer, numeric, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_nota_remision_detalle(voperacion integer, vidremision integer, vproducto numeric, vdeposito integer, vcantidad integer, vdepodestino integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$ 
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF voperacion = 1 THEN
+		PERFORM * FROM remision_ndetalle WHERE pro_cod  = vproducto AND id_depo = vdeposito AND id_remision = vidremision;
+		IF FOUND THEN
+			mensaje = 'ERROR_/_YA EXISTE ESTE PRODUCTO EN EL DETALLE';
+		ELSE
+			PERFORM * FROM ref_stock WHERE pro_cod  = vproducto AND id_depo = vdeposito AND st_cantidad >= vcantidad;
+			IF FOUND THEN 
+				INSERT INTO remision_ndetalle VALUES (vidremision,vproducto,vdeposito,vcantidad,vdepodestino);
+				mensaje = 'NOTICIA_/_PRODUCTO AGREGADO CON EXITO';
+			ELSE
+				mensaje = 'ERROR_/_LA CANTIDAD SOLICITADA SUPERA EL STOCK';
+			END IF;
+			
+		END IF; 
+		
+		
+		END IF;
+		IF voperacion = 2 THEN
+			DELETE FROM remision_ndetalle WHERE  pro_cod  = vproducto AND id_depo = vdeposito AND id_remision = vidremision;
+			mensaje = 'NOTICIA_/_SE HA QUITADO EL PRODUCTO DEL DETALLE'; 
+		END IF;	
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_nota_remision_detalle(voperacion integer, vidremision integer, vproducto numeric, vdeposito integer, vcantidad integer, vdepodestino integer) OWNER TO postgres;
+
+--
+-- TOC entry 287 (class 1255 OID 63355)
+-- Name: sp_numero_letras(numeric); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_numero_letras(numero numeric) RETURNS text
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+     lnEntero INTEGER;
+     lcRetorno TEXT;
+     lnTerna INTEGER;
+     lcMiles TEXT;
+     lcCadena TEXT;
+     lnUnidades INTEGER;
+     lnDecenas INTEGER;
+     lnCentenas INTEGER;
+     lnFraccion INTEGER;
+     lnSw INTEGER;
+BEGIN
+     lnEntero := FLOOR(numero)::INTEGER;--Obtenemos la parte Entera
+     lnFraccion := FLOOR(((numero - lnEntero) * 100))::INTEGER;--Obtenemos la Fraccion del Monto
+     lcRetorno := '';
+     lnTerna := 1;
+     IF lnEntero > 0 THEN
+     lnSw := LENGTH(lnEntero::text);
+     WHILE lnTerna <= lnSw LOOP
+        -- Recorro terna por terna
+        lcCadena = '';
+        lnUnidades = lnEntero % 10;
+        lnEntero = CAST(lnEntero/10 AS INTEGER);
+        lnDecenas = lnEntero % 10;
+        lnEntero = CAST(lnEntero/10 AS INTEGER);
+        lnCentenas = lnEntero % 10;
+        lnEntero = CAST(lnEntero/10 AS INTEGER);
+    -- Analizo las unidades
+       SELECT
+         CASE /* UNIDADES */
+           WHEN lnUnidades = 1 AND lnTerna = 1 THEN 'UNO ' || lcCadena
+           WHEN lnUnidades = 1 AND lnTerna <> 1 THEN 'UN ' || lcCadena
+           WHEN lnUnidades = 2 THEN 'DOS ' || lcCadena
+           WHEN lnUnidades = 3 THEN 'TRES ' || lcCadena
+           WHEN lnUnidades = 4 THEN 'CUATRO ' || lcCadena
+           WHEN lnUnidades = 5 THEN 'CINCO ' || lcCadena
+           WHEN lnUnidades = 6 THEN 'SEIS ' || lcCadena
+           WHEN lnUnidades = 7 THEN 'SIETE ' || lcCadena
+           WHEN lnUnidades = 8 THEN 'OCHO ' || lcCadena
+           WHEN lnUnidades = 9 THEN 'NUEVE ' || lcCadena
+           ELSE lcCadena
+          END INTO lcCadena;
+          /* UNIDADES */
+    -- Analizo las decenas
+    SELECT
+    CASE /* DECENAS */
+      WHEN lnDecenas = 1 THEN
+        CASE lnUnidades
+          WHEN 0 THEN 'DIEZ '
+          WHEN 1 THEN 'ONCE '
+          WHEN 2 THEN 'DOCE '
+          WHEN 3 THEN 'TRECE '
+          WHEN 4 THEN 'CATORCE '
+          WHEN 5 THEN 'QUINCE '
+          ELSE 'DIECI' || lcCadena
+        END
+      WHEN lnDecenas = 2 AND lnUnidades = 0 THEN 'VEINTE ' || lcCadena
+      WHEN lnDecenas = 2 AND lnUnidades <> 0 THEN 'VEINTI' || lcCadena
+      WHEN lnDecenas = 3 AND lnUnidades = 0 THEN 'TREINTA ' || lcCadena
+      WHEN lnDecenas = 3 AND lnUnidades <> 0 THEN 'TREINTA Y ' || lcCadena
+      WHEN lnDecenas = 4 AND lnUnidades = 0 THEN 'CUARENTA ' || lcCadena
+      WHEN lnDecenas = 4 AND lnUnidades <> 0 THEN 'CUARENTA Y ' || lcCadena
+      WHEN lnDecenas = 5 AND lnUnidades = 0 THEN 'CINCUENTA ' || lcCadena
+      WHEN lnDecenas = 5 AND lnUnidades <> 0 THEN 'CINCUENTA Y ' || lcCadena
+      WHEN lnDecenas = 6 AND lnUnidades = 0 THEN 'SESENTA ' || lcCadena
+      WHEN lnDecenas = 6 AND lnUnidades <> 0 THEN 'SESENTA Y ' || lcCadena
+      WHEN lnDecenas = 7 AND lnUnidades = 0 THEN 'SETENTA ' || lcCadena
+      WHEN lnDecenas = 7 AND lnUnidades <> 0 THEN 'SETENTA Y ' || lcCadena
+      WHEN lnDecenas = 8 AND lnUnidades = 0 THEN 'OCHENTA ' || lcCadena
+      WHEN lnDecenas = 8 AND lnUnidades <> 0 THEN 'OCHENTA Y ' || lcCadena
+      WHEN lnDecenas = 9 AND lnUnidades = 0 THEN 'NOVENTA ' || lcCadena
+      WHEN lnDecenas = 9 AND lnUnidades <> 0 THEN 'NOVENTA Y ' || lcCadena
+      ELSE lcCadena
+    END INTO lcCadena; /* DECENAS */
+    -- Analizo las centenas
+    SELECT
+    CASE /* CENTENAS */
+      WHEN lnCentenas = 1 AND lnUnidades = 0 AND lnDecenas = 0 THEN 'CIEN ' || lcCadena
+      WHEN lnCentenas = 1 AND NOT(lnUnidades = 0 AND lnDecenas = 0) THEN 'CIENTO ' || lcCadena
+      WHEN lnCentenas = 2 THEN 'DOSCIENTOS ' || lcCadena
+      WHEN lnCentenas = 3 THEN 'TRESCIENTOS ' || lcCadena
+      WHEN lnCentenas = 4 THEN 'CUATROCIENTOS ' || lcCadena
+      WHEN lnCentenas = 5 THEN 'QUINIENTOS ' || lcCadena
+      WHEN lnCentenas = 6 THEN 'SEISCIENTOS ' || lcCadena
+      WHEN lnCentenas = 7 THEN 'SETECIENTOS ' || lcCadena
+      WHEN lnCentenas = 8 THEN 'OCHOCIENTOS ' || lcCadena
+      WHEN lnCentenas = 9 THEN 'NOVECIENTOS ' || lcCadena
+      ELSE lcCadena
+    END INTO lcCadena;/* CENTENAS */
+    -- Analizo la terna
+    SELECT
+    CASE /* TERNA */
+      WHEN lnTerna = 1 THEN lcCadena
+      WHEN lnTerna = 2 AND (lnUnidades + lnDecenas + lnCentenas <> 0) THEN lcCadena || 'MIL '
+      WHEN lnTerna = 3 AND (lnUnidades + lnDecenas + lnCentenas <> 0) AND
+        lnUnidades = 1 AND lnDecenas = 0 AND lnCentenas = 0 THEN lcCadena || 'MILLON '
+      WHEN lnTerna = 3 AND (lnUnidades + lnDecenas + lnCentenas <> 0) AND
+        NOT (lnUnidades = 1 AND lnDecenas = 0 AND lnCentenas = 0) THEN lcCadena || 'MILLONES '
+      WHEN lnTerna = 4 AND (lnUnidades + lnDecenas + lnCentenas <> 0) THEN lcCadena || 'MIL MILLONES '
+      ELSE ''
+    END INTO lcCadena;/* TERNA */
+ 
+    --Retornamos los Valores Obtenidos
+    lcRetorno = lcCadena  || lcRetorno;
+    lnTerna = lnTerna + 1;
+    END LOOP;
+  END IF;
+  IF lnTerna = 1 THEN
+    lcRetorno := 'CERO';
+  END IF;
+  --lcRetorno := RTRIM(lcRetorno) || ' ENTEROS CON ' || LTRIM(lnFraccion::text) || 'CENTÉSIMOS';
+RETURN lcRetorno;
+END;
+$$;
+
+
+ALTER FUNCTION public.sp_numero_letras(numero numeric) OWNER TO postgres;
+
+--
+-- TOC entry 288 (class 1255 OID 63356)
+-- Name: sp_orden_compras(integer, integer, integer, date, character varying, integer, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_orden_compras(operacion integer, vidorden integer, vproveedor integer, vfecha date, vestado character varying, vusuario integer, vidpresupuesto integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		cangrego record;
+		ultimo INTEGER;
+		det record;
+		prov integer;
+		crustaceo integer;
+		
+	BEGIN
+		IF operacion = 1 THEN
+				IF (vidpresupuesto>0) THEN
+					SELECT id_pedido INTO crustaceo FROM presupuesto WHERE id_presu = vidpresupuesto;
+					UPDATE compras_pedidos SET estado = 'EN USO' WHERE id_pedido = crustaceo; 
+					SELECT prv_cod INTO prov FROM presupuesto WHERE id_presu = vidpresupuesto;
+					--Cargar la cabecera
+					SELECT COALESCE(MAX(nro_orden),0)+1 INTO ultimo FROM orden_de_compra;
+					INSERT INTO orden_de_compra VALUES(ultimo,prov,vidpresupuesto,vfecha,0,0,vestado,vusuario);
+					mensaje = 'NOTICIA_/_AGREGADO CON EXITO';
+					--modificar el estado del presupuesto
+					UPDATE presupuesto SET estado = 'EN USO' WHERE id_presu = vidpresupuesto;
+					---CARGAR DETALLE 
+					PERFORM * FROM detalle_presupuesto WHERE id_presu = vidpresupuesto;
+					IF FOUND THEN 
+					FOR det IN SELECT * FROM detalle_presupuesto WHERE id_presu=vidpresupuesto
+					LOOP 
+					INSERT INTO detalle_orden VALUES (ultimo,det.id_depo,det.pro_cod,det.iva5,det.exentas,det.precio_unit,det.iva10,det.subtotal,det.cantidad,'ACTIVO'); 
+					END LOOP;
+					END IF;
+				ELSE
+					SELECT COALESCE(MAX(nro_orden),0)+1 INTO ultimo FROM orden_de_compra;
+					INSERT INTO orden_de_compra VALUES(ultimo,vproveedor,0,vfecha,0,0,vestado,vusuario);
+					mensaje = 'NOTICIA_/_AGREGADO CON EXITO';
+				END IF;
+		END IF;
+			IF operacion = 2 THEN
+			UPDATE orden_de_compra SET estado = 'ANULADO' WHERE nro_orden = vidorden;
+			mensaje = 'NOTICIA_/_SE HA ANULADO CON EXITO';
+		END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_orden_compras(operacion integer, vidorden integer, vproveedor integer, vfecha date, vestado character varying, vusuario integer, vidpresupuesto integer) OWNER TO postgres;
+
+--
+-- TOC entry 289 (class 1255 OID 63357)
+-- Name: sp_ordenc_detalle(integer, integer, integer, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ordenc_detalle(voperacion integer, vidorden integer, vproducto integer, vdeposito integer, vprecio integer, vcantidad integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+		vsubtotal NUMERIC;
+		viva5 INTEGER;
+		viva10 INTEGER;
+		vexentas INTEGER;
+	BEGIN
+		IF voperacion = 1 THEN
+			PERFORM * FROM v_orden_detalle  WHERE pro_cod = vproducto AND id_depo = vdeposito AND nro_orden = vidorden;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE PRODUCTO EN EL DETALLE';
+			ELSE
+			
+				vsubtotal = vcantidad * vprecio;
+				PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp = 1;
+				IF FOUND THEN 
+					viva5 = round(vprecio/21);
+				ELSE 
+					viva5 = 0;
+				END IF;
+				PERFORM * FROM v_ref_producto WHERE pro_cod = vproducto AND id_timp =2;
+				IF FOUND THEN 
+					viva10 = round(vprecio/21);
+				ELSE 
+					viva10= 0;
+				END IF;
+				IF viva5 = 0 AND viva10 = 0 THEN 
+					vexentas = vprecio;
+				ELSE 
+					vexentas = 0;
+				END IF;					
+				INSERT INTO detalle_orden
+				VALUES(vidorden, vdeposito, vproducto,viva5, vexentas,vprecio,viva10,vsubtotal, vcantidad,'ACTIVO');
+				mensaje = 'NOTICIA_/_ITEM AGREGADO CON EXITO';
+			END IF;  
+		END IF;
+		IF voperacion = 2 THEN
+			DELETE FROM detalle_orden WHERE pro_cod = vproducto AND id_depo = vdeposito AND nro_orden = vidorden;
+			mensaje = 'NOTICIA_/_SE HA QUITADO EL ITEM DEL DETALLE'; 
+		END IF;
+		IF voperacion = 3 THEN
+			PERFORM * FROM detalle_orden  WHERE nro_orden = vidorden;
+			IF FOUND THEN 
+				PERFORM * FROM orden_de_compra  WHERE nro_orden = vidorden AND estado ='ACTIVO';
+				IF FOUND THEN 
+					UPDATE orden_de_compra SET estado = 'CONFIRMADO' WHERE nro_orden = vidorden;
+					mensaje = 'NOTICIA_/_ORDEN DE COMPRAS CONFIRMADO';
+				ELSE	
+					PERFORM * FROM orden_de_compra  WHERE nro_orden = vidorden AND estado ='ANULADO';
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_LA ORDEN DE COMPRA YA SE ENCUENTRA ANULADO'; 
+					ELSE
+						mensaje = 'ERROR_/_LA ORDEN DE COMPRA YA SE ENCUENTRA CONFIRMADO'; 
+					END IF;					
+				END IF; 
+			ELSE
+				mensaje = 'ERROR_/_DEBE CARGAR DETALLES EN LA ORDEN DE COMPRA'; 
+			END IF;
+		END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ordenc_detalle(voperacion integer, vidorden integer, vproducto integer, vdeposito integer, vprecio integer, vcantidad integer) OWNER TO postgres;
+
+--
+-- TOC entry 290 (class 1255 OID 63358)
+-- Name: sp_presupuesto(integer, integer, integer, integer, integer, date, date); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_presupuesto(operacion integer, vidpresupuesto integer, vproveedor integer, vidpedido integer, vusuario integer, validez date, vfecha date) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+		det record;
+	BEGIN
+		SELECT * INTO det FROM compras_pedidos_detalle WHERE id_pedido = vidpedido;
+		IF operacion = 1 THEN
+			PERFORM * FROM presupuesto WHERE prv_cod  = vproveedor AND id_pedido = vidpedido;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE PRESUPUESTO*presupuesto_index.php?vpre=' || vidpedido;
+			ELSE
+				IF (vfecha < validez) THEN
+				
+					SELECT COALESCE(MAX(id_presu),0)+1 INTO ultimo FROM presupuesto;
+					INSERT INTO presupuesto(id_presu,prv_cod,id_pedido,usu_cod,validez,total,estado,fecha)
+					VALUES(ultimo, vproveedor, vidpedido,vusuario,validez,0,'ACTIVO',vfecha);
+					mensaje = 'NOTICIA_/_AGREGADO CON EXITO*presupuesto_index.php?vpre=' || vidpedido;
+					--INSERTA EL DETALLE 
+					PERFORM * FROM compras_pedidos_detalle  WHERE id_pedido = vidpedido;
+					IF FOUND THEN
+						FOR det IN SELECT * FROM compras_pedidos_detalle WHERE id_pedido = vidpedido LOOP
+						INSERT INTO detalle_presupuesto VALUES(ultimo,det.pro_cod,det.id_depo,det.cantidad,det.precio_unit,det.subtotal,det.iva5,det.iva10,det.exentas);
+						END LOOP;
+					END IF;	
+				ELSE
+					mensaje = 'ERROR_/_LA FECHA DE VALIDEZ NO CORRESPONDE*presupuesto_index.php?vpre=' || vidpedido;
+				END IF;				
+					
+			END IF;  
+		END IF;
+		--CARGAR EL TOTAL EN LA CABECERA AUTOMATICAMENTE 
+		PERFORM * FROM compras_pedidos_detalle WHERE id_pedido = vidpedido;
+			IF FOUND THEN
+				UPDATE presupuesto SET total = (select sum(subtotal) from compras_pedidos_detalle where id_pedido = vidpedido)
+				WHERE id_presu = ultimo;
+			ELSE
+				UPDATE presupuesto SET total = 0 WHERE  id_presu = vidpresupuesto; 
+			END IF;
+			
+		IF operacion = 3 THEN
+			UPDATE presupuesto SET estado = 'ANULADO' WHERE id_presu = vidpresupuesto;
+			mensaje = 'NOTICIA_/_SE HA ANULADO CON EXITO*presupuesto_index.php?vpre=' || vidpedido;
+		END IF;
+		RETURN mensaje;
+		
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_presupuesto(operacion integer, vidpresupuesto integer, vproveedor integer, vidpedido integer, vusuario integer, validez date, vfecha date) OWNER TO postgres;
+
+--
+-- TOC entry 291 (class 1255 OID 63359)
+-- Name: sp_presupuesto_detalle(integer, integer, integer, integer, integer, numeric); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_presupuesto_detalle(voperacion integer, vidpresupuesto integer, vproducto integer, vdeposito integer, vcantidad integer, vprecio numeric) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+		vsubtotal numeric;
+	BEGIN
+		IF voperacion = 1 THEN
+			vsubtotal = vcantidad * vprecio;
+			UPDATE detalle_presupuesto SET precio_unit = vprecio, subtotal = vsubtotal WHERE id_presu = vidpresupuesto AND pro_cod = vproducto 
+			AND id_depo = vdeposito ;
+			mensaje = 'NOTICIA_/_MODIFICADO CON EXITO';
+		END IF;
+		IF voperacion = 2 THEN
+			DELETE FROM compras_pedidos_detalle WHERE  pro_cod  = vproducto AND id_depo = vdeposito AND id_pedido = vidpedido;
+			mensaje = 'NOTICIA_/_SE HA QUITADO EL PRODUCTO DEL DETALLE';    
+		END IF;
+		IF voperacion = 3 THEN
+			PERFORM * FROM detalle_presupuesto  WHERE id_presu = vidpresupuesto;
+				IF FOUND THEN 
+					PERFORM * FROM presupuesto  WHERE id_presu = vidpresupuesto AND estado ='ACTIVO';
+					IF FOUND THEN 
+						UPDATE presupuesto SET estado = 'CONFIRMADO' WHERE id_presu = vidpresupuesto;
+						mensaje = 'NOTICIA_/_PRESUPUESTO CONFIRMADO';
+					ELSE	
+						PERFORM * FROM presupuesto  WHERE id_presu = vidpresupuesto AND estado ='ANULADO';
+						IF FOUND THEN 
+							mensaje = 'ERROR_/_EL PEDIDO SE ENCUENTRA ANULADO'; 
+						ELSE
+							mensaje = 'ERROR_/_EL PEDIDO YA SE ENCUENTRA CONFIRMADO'; 
+						END IF;
+					END IF; 
+				ELSE
+					mensaje = 'ERROR_/_DEBE CARGAR DETALLES EN EL PRESUPUESTO'; 
+				END IF;
+			--RAISE EXCEPTION '';	
+		END IF;	
+		--CARGAR EL TOTAL EN LA CABECERA AUTOMATICAMENTE 
+		PERFORM * FROM detalle_presupuesto WHERE id_presu = vidpresupuesto;
+			IF FOUND THEN
+				UPDATE presupuesto SET total = (select sum(subtotal) from detalle_presupuesto where id_presu = vidpresupuesto)
+				WHERE id_presu = vidpresupuesto;
+			ELSE
+				UPDATE presupuesto SET total = 0 WHERE  id_presu = vidpresupuesto; 
+			END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_presupuesto_detalle(voperacion integer, vidpresupuesto integer, vproducto integer, vdeposito integer, vcantidad integer, vprecio numeric) OWNER TO postgres;
+
+--
+-- TOC entry 292 (class 1255 OID 63360)
+-- Name: sp_ref_cargos(integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_cargos(operacion integer, codigo integer, descripcion character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE operacion 
+			WHEN 1 THEN
+				PERFORM * FROM ref_cargos WHERE car_descri = upper(descripcion);
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE UN CARGO CON ESE NOMBRE';
+				ELSE 
+					ultimo = (SELECT COALESCE (MAX(id_cargo),0)+1 FROM ref_cargos);
+					INSERT INTO ref_cargos VALUES (ultimo, upper(descripcion));
+						mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE';
+				END IF;
+			WHEN 2 THEN
+					PERFORM * FROM ref_cargos WHERE car_descri = upper(descripcion);
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					UPDATE ref_cargos SET car_descri = upper(descripcion) WHERE id_cargo = codigo;
+						mensaje = 'NOTICIA_/_MODIFICADO CON EXITO'; 
+			   END IF;
+			WHEN 3 THEN
+					PERFORM * FROM ref_empleado WHERE id_cargo = codigo;
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_NO SE PUEDE POR QUE ESTA EN USO';
+					ELSE 
+					DELETE FROM ref_cargos WHERE id_cargo = codigo;
+					mensaje = 'NOTICIA_/_ CARGO BORRADO CON EXITO';
+				END IF;
+
+			END CASE;
+	RETURN mensaje;				
+	END;
+	
+$$;
+
+
+ALTER FUNCTION public.sp_ref_cargos(operacion integer, codigo integer, descripcion character varying) OWNER TO postgres;
+
+--
+-- TOC entry 293 (class 1255 OID 63361)
+-- Name: sp_ref_ciudad(integer, integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_ciudad(operacion integer, codigo integer, pais integer, descripcion character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF operacion = 1 THEN
+			PERFORM * FROM ref_ciudad  WHERE ciu_descri = upper(descripcion);
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTA CIUDAD*ciudad_index';
+			ELSE
+				SELECT COALESCE(MAX(id_ciudad),0)+1 INTO ultimo FROM ref_ciudad;
+				INSERT INTO ref_ciudad(id_ciudad, id_pais, ciu_descri)
+				VALUES(ultimo, pais, upper(descripcion));
+				mensaje = 'NOTICIA_/_AGREGADO CON EXITO*ciudad_index';
+			END IF;  
+		END IF;
+		IF operacion = 2 THEN
+			PERFORM * FROM ref_ciudad WHERE ciu_descri = upper(descripcion) AND id_pais = pais;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTA CIUDAD*ciudad_index';
+			ELSE
+				UPDATE ref_ciudad SET id_pais = pais, ciu_descri = upper(descripcion)
+				WHERE id_ciudad = codigo;
+				mensaje = 'NOTICIA_/_MODIFICADO CON EXITO*ciudad_index';
+			END IF;	
+		END IF;
+		IF operacion = 3 THEN
+			PERFORM * FROM ref_ciudad WHERE id_ciudad IN(SELECT id_ciudad FROM ref_sucursal WHERE id_ciudad = codigo)
+			AND id_ciudad IN (SELECT id_ciudad FROM ref_persona WHERE id_ciudad = codigo) 
+			AND id_ciudad IN(SELECT id_ciudad FROM ref_proveedor WHERE id_ciudad = codigo);
+			IF FOUND THEN
+				mensaje = 'ERROR_/_LA CIUDAD YA ESTÁ EN USO, NO SE PUEDE BORRAR*ciudad_index';
+			ELSE
+				DELETE FROM ref_ciudad WHERE id_ciudad= codigo;
+				mensaje = 'NOTICIA_/_BORRADO CON EXITO*ciudad_index';
+			END IF;
+		END IF;
+		--INSERCION DE PAIS POR LA INTERFAZ DE PRODUCTO
+		IF operacion = 4 THEN
+			PERFORM * FROM  ref_pais WHERE pai_descri = upper(descripcion);
+			IF FOUND THEN
+				mensaje= 'ERROR_/_YA EXISTE ESTE PAIS*ciudad_add';
+
+			ELSE
+				SELECT COALESCE(MAX(id_pais),0)+1 INTO ultimo FROM ref_pais;
+				INSERT INTO ref_pais VALUES (ultimo, upper(descripcion));
+				mensaje = 'NOTICIA_/_PAIS INSERTADO CON EXITO*ciudad_add';
+				END IF;
+			END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_ciudad(operacion integer, codigo integer, pais integer, descripcion character varying) OWNER TO postgres;
+
+--
+-- TOC entry 294 (class 1255 OID 63362)
+-- Name: sp_ref_deposito(integer, integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_deposito(operacion integer, codigo integer, sucursal integer, descripcion character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF operacion = 1 THEN
+			PERFORM * FROM ref_deposito  WHERE dep_descri  = upper(descripcion) AND id_depo = ultimo;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE DEPOSITO*deposito_index';
+			ELSE
+				SELECT COALESCE(MAX(id_depo),0)+1 INTO ultimo FROM ref_deposito;
+				INSERT INTO ref_deposito
+				VALUES(ultimo, sucursal, upper(descripcion));
+
+				mensaje = 'NOTICIA_/_AGREGADO CON EXITO*deposito_index';
+			END IF;  
+		END IF;
+		IF operacion = 2 THEN
+			PERFORM * FROM ref_deposito WHERE id_depo=codigo AND id_sucursal=sucursal  AND dep_descri = upper(descripcion);
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE UN DEPOSITO CON ESAS CARACTERISTICAS*deposito_index';
+			ELSE
+				UPDATE ref_deposito SET id_sucursal=sucursal, dep_descri = upper(descripcion)
+				WHERE id_depo = codigo;
+				mensaje = 'NOTICIA_/_MODIFICADO CON EXITO*deposito_index';
+			END IF;	
+		END IF;
+		IF operacion = 3 THEN
+			PERFORM * FROM ref_stock WHERE id_depo = codigo;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_NO SE PUEDE BORRAR PORQUE ESTA EN USO*deposito_index';
+			ELSE
+				DELETE FROM ref_deposito WHERE id_depo = codigo;
+				mensaje = 'NOTICIA_/_BORRADO CON EXITO*deposito_index';
+			END IF;
+		END IF;
+		--INSERCION DE SUCURSAL POR LA INTERFAZ DE DEPOSITO
+		IF operacion = 4 THEN
+			SELECT COALESCE(MAX(id_sucursal),0)+1 INTO ultimo FROM ref_sucursal;
+			INSERT INTO ref_sucursal VALUES (ultimo, ultimo, upper(descripcion), codigo, upper(descripcion));
+			mensaje = 'NOTICIA_/_SUCURSAL INSERTADA CON EXITO*deposito_add';
+		END IF;
+		
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_deposito(operacion integer, codigo integer, sucursal integer, descripcion character varying) OWNER TO postgres;
+
+--
+-- TOC entry 295 (class 1255 OID 63363)
+-- Name: sp_ref_empleado(integer, integer, integer, integer, integer, character varying, character varying, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_empleado(operacion integer, codigo integer, idpersona integer, idcargo integer, idsucursal integer, descripcion character varying, suctelefono character varying, sucdirec character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+	mensaje VARCHAR;
+	repetido INTEGER;
+	ultimo INTEGER;
+	BEGIN
+			IF operacion = 1 THEN
+				PERFORM * FROM ref_empleado WHERE id_empleado != codigo AND id_persona = idpersona;
+				IF FOUND THEN
+					mensaje='ERROR_/_YA EXISTE UN EMPLEADO ADERIDO*empleado_add';
+				ELSE
+					ultimo = (SELECT COALESCE(MAX(id_empleado),0)+1 FROM ref_empleado);
+					INSERT INTO ref_empleado VALUES(ultimo,idpersona,idcargo,idsucursal,'ACTIVO');
+					mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE*empleado_index';
+				END IF;
+			END IF;
+			
+			IF operacion = 2 THEN
+				PERFORM * FROM ref_empleado WHERE id_empleado != codigo AND id_persona = idpersona AND id_cargo = idcargo;
+					IF FOUND THEN
+						mensaje='ERROR_/_YA EXISTE UN EMPLEADO CON ESOS DATOS*empleado_edit';
+					ELSE
+						UPDATE ref_empleado SET  id_persona = idpersona , id_cargo = idcargo, id_sucursal =idsucursal
+						  WHERE id_empleado = codigo;
+						mensaje = 'NOTICIA_/_MODIFICADO CON EXITO*empleado_index';
+					END IF;
+			END IF;	
+			
+			IF operacion = 3 THEN
+				UPDATE ref_empleado SET estado = 'INACTIVO' WHERE id_empleado = codigo;
+				mensaje = 'NOTICIA_/_SE HA DESACTIVADO CON EXITO*empleado_index';
+			END IF;
+
+			IF operacion = 4 THEN 
+				PERFORM * FROM ref_cargos WHERE car_descri= upper(descripcion);
+					IF FOUND THEN
+						mensaje='ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE*empleado_add';
+					ELSE
+						ultimo = (SELECT COALESCE(MAX(id_cargo),0)+1 FROM ref_cargos);
+						INSERT INTO ref_cargos VALUES(ultimo,upper(descripcion));
+						mensaje = 'NOTICIA_/_CARGO GUARDADO EXITOSAMENTE*empleado_add';
+					END IF;
+			END IF;
+				
+			IF operacion = 5 THEN
+				PERFORM * FROM ref_sucursal WHERE suc_descri = upper(descripcion); 
+					IF FOUND THEN
+					 mensaje='ERROR_/_YA EXISTE UNA SUCURSAL CON ESE NOMBRE*empleado_add';
+					ELSE
+						SELECT COALESCE(MAX(id_sucursal),0)+1 into ultimo FROM ref_sucursal ;
+						INSERT INTO ref_sucursal VALUES(ultimo,idcargo, upper(descripcion),suctelefono, sucdirec);
+						mensaje = 'NOTICIA_/_AGREGADO CON EXITO*empleado_add';
+					END IF;
+			END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_empleado(operacion integer, codigo integer, idpersona integer, idcargo integer, idsucursal integer, descripcion character varying, suctelefono character varying, sucdirec character varying) OWNER TO postgres;
+
+--
+-- TOC entry 296 (class 1255 OID 63364)
+-- Name: sp_ref_grupos(integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_grupos(operacion integer, codigo integer, nombre character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE operacion 
+			WHEN 1 THEN
+				PERFORM * FROM ref_grupos WHERE gru_nombre = upper(nombre);
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					ultimo = (SELECT COALESCE (MAX(gru_cod),0)+1 FROM ref_grupos);
+					INSERT INTO ref_grupos VALUES (ultimo, upper(nombre));
+						mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE';
+				END IF;
+			WHEN 2 THEN
+					PERFORM * FROM ref_grupos WHERE gru_nombre = upper(nombre);
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					UPDATE ref_grupos SET gru_nombre = upper(nombre) WHERE gru_cod = codigo;
+						mensaje = 'NOTICIA_/_MODIFICADO CON EXITO'; 
+			   END IF;
+			WHEN 3 THEN
+					PERFORM * FROM ref_usuario WHERE gru_cod = codigo;
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_NO SE PUEDE POR QUE ESTA EN USO';
+					ELSE 
+					DELETE FROM ref_grupos WHERE gru_cod = codigo;
+					mensaje = 'NOTICIA_/_BORRADO CON EXITO';
+				END IF;
+
+			END CASE;
+	RETURN mensaje;				
+	END;
+	
+$$;
+
+
+ALTER FUNCTION public.sp_ref_grupos(operacion integer, codigo integer, nombre character varying) OWNER TO postgres;
+
+--
+-- TOC entry 297 (class 1255 OID 63365)
+-- Name: sp_ref_marca(integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_marca(operacion integer, codigo integer, nombre character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE operacion 
+			WHEN 1 THEN
+				PERFORM * FROM ref_marca WHERE mar_descri = upper(nombre);
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					ultimo = (SELECT COALESCE (MAX(mar_cod),0)+1 FROM ref_marca);
+					INSERT INTO ref_marca VALUES (ultimo, upper(nombre));
+						mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE';
+				END IF;
+			WHEN 2 THEN
+					PERFORM * FROM ref_marca WHERE mar_descri = upper(nombre);
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					UPDATE ref_marca SET mar_descri = upper(nombre) WHERE mar_cod = codigo;
+						mensaje = 'NOTICIA_/_MODIFICADO CON EXITO'; 
+			   END IF;
+			WHEN 3 THEN
+					PERFORM * FROM ref_producto WHERE mar_cod = codigo;
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_NO SE PUEDE POR QUE ESTA EN USO';
+					ELSE 
+					DELETE FROM ref_marca WHERE mar_cod = codigo;
+					mensaje = 'NOTICIA_/_BORRADO CON EXITO';
+				END IF;
+
+			END CASE;
+	RETURN mensaje;				
+	END;
+	
+$$;
+
+
+ALTER FUNCTION public.sp_ref_marca(operacion integer, codigo integer, nombre character varying) OWNER TO postgres;
+
+--
+-- TOC entry 298 (class 1255 OID 63366)
+-- Name: sp_ref_pagina(integer, integer, character varying, character varying, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_pagina(operacion integer, codigo integer, direccion character varying, nombre character varying, modulo integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE operacion 
+			WHEN 1 THEN
+				PERFORM * FROM ref_paginas WHERE pag_direc =(direccion);
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE UNA PAGINA CON ESA DIRECCION*pagina_index';
+				ELSE 
+					ultimo = (SELECT COALESCE (MAX(pag_cod),0)+1 FROM ref_paginas);
+					INSERT INTO ref_paginas VALUES (ultimo,direccion,upper(nombre),modulo);
+						mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE*pagina_index';
+				END IF;
+			WHEN 2 THEN
+				PERFORM * FROM ref_permisos WHERE pag_cod =(codigo);
+				IF FOUND THEN
+					mensaje = 'ERROR_/_NO SE PUEDE BORRAR POR QUE ESTA EN USO*pagina_index';
+				ELSE	
+					DELETE FROM ref_paginas WHERE pag_cod = codigo;
+					mensaje = 'NOTICIA_/_ PAGINA BORRADO CON EXITO*pagina_index';
+				END IF;	
+			END CASE;
+	RETURN mensaje;				
+	END;
+	
+$$;
+
+
+ALTER FUNCTION public.sp_ref_pagina(operacion integer, codigo integer, direccion character varying, nombre character varying, modulo integer) OWNER TO postgres;
+
+--
+-- TOC entry 299 (class 1255 OID 63367)
+-- Name: sp_ref_pais(integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_pais(operacion integer, codigo integer, nombre character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE operacion 
+			WHEN 1 THEN
+				PERFORM * FROM ref_pais WHERE pai_descri = upper(nombre);
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					ultimo = (SELECT COALESCE (MAX(id_pais),0)+1 FROM ref_pais);
+					INSERT INTO ref_pais VALUES (ultimo, upper(nombre));
+						mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE';
+				END IF;
+			WHEN 2 THEN
+					PERFORM * FROM ref_pais WHERE pai_descri = upper(nombre);
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					UPDATE ref_pais SET pai_descri = upper(nombre) WHERE id_pais = codigo;
+						mensaje = 'NOTICIA_/_MODIFICADO CON EXITO'; 
+			   END IF;
+			WHEN 3 THEN
+					PERFORM * FROM ref_ciudad WHERE id_pais = codigo;
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_NO SE PUEDE POR QUE ESTA EN USO';
+					ELSE 
+					DELETE FROM ref_pais WHERE id_pais = codigo;
+					mensaje = 'NOTICIA_/_BORRADO CON EXITO';
+				END IF;
+
+			END CASE;
+	RETURN mensaje;				
+	END;
+	
+$$;
+
+
+ALTER FUNCTION public.sp_ref_pais(operacion integer, codigo integer, nombre character varying) OWNER TO postgres;
+
+--
+-- TOC entry 300 (class 1255 OID 63368)
+-- Name: sp_ref_permisos(integer, integer, boolean, boolean, boolean, boolean, character varying, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_permisos(pagina integer, grupo integer, leer boolean, insertar boolean, edit boolean, borrar boolean, usuario character varying, operacion integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF operacion = 1 THEN
+			PERFORM * FROM ref_permisos  WHERE pag_cod=pagina AND gru_cod=grupo;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE PERMISO';
+				
+			ELSE
+				INSERT INTO ref_permisos
+				VALUES(pagina,grupo,leer,insertar,edit,borrar,usuario);
+				mensaje = 'NOTICIA_/_SE LE HAN ASIGNADO PERMISOS AL USUARIO CON EXITO';	
+			END IF;  
+		END IF;
+		IF operacion = 2 THEN
+			DELETE FROM ref_permisos WHERE pag_cod=pagina AND gru_cod=grupo;
+			mensaje = 'NOTICIA_/_BORRADO CON EXITO';
+		END IF;
+		RETURN mensaje;
+		
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_permisos(pagina integer, grupo integer, leer boolean, insertar boolean, edit boolean, borrar boolean, usuario character varying, operacion integer) OWNER TO postgres;
+
+--
+-- TOC entry 301 (class 1255 OID 63369)
+-- Name: sp_ref_persona(integer, integer, integer, integer, character varying, character varying, character varying, character varying, character varying, character varying, character varying, character varying, date, character varying, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_persona(operacion integer, vidpersona integer, vidciudad integer, vtipoper integer, vnombre character varying, vapellido character varying, vci character varying, vruc character varying, vdireccion character varying, vtelefono character varying, vcorreo character varying, vsexo character varying, vfechanac date, vrazons character varying, vimagen character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF operacion = 1 THEN
+			PERFORM * FROM ref_persona WHERE per_nro_doc = vci OR per_ruc = vruc;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE UNA PERSONA CON ESTA DOCUMENTACION*persona_index';
+			ELSE
+			IF vfechanac > (current_date - '18 years'::interval)::date THEN
+			mensaje = 'ERROR_/_LA EDAD INGRESADA ES MENOR A 18 AÑOS*persona_add';
+			ELSE
+				SELECT COALESCE(MAX(id_persona),0)+1 INTO ultimo FROM ref_persona;
+				INSERT INTO ref_persona(id_persona, id_ciudad, tipo_per_cod, per_nombre, per_apellido, per_nro_doc, per_ruc, 
+				per_direccion, per_telefono, per_email, per_sexo, per_fecha_nacimiento, razon_social, per_estado, per_imagen)
+				VALUES(ultimo, vidciudad, vtipoper, upper(vnombre), upper(vapellido), upper(vci), vruc, upper(vdireccion), 
+				vtelefono, vcorreo, vsexo, vfechanac, upper(vrazons), 'ACTIVO', vimagen);
+				mensaje = 'NOTICIA_/_AGREGADO CON EXITO*persona_index';
+			END IF;
+			END IF;  
+		END IF;
+		IF operacion = 2 THEN
+			PERFORM * FROM ref_persona  WHERE per_nro_doc=vci AND per_nombre=vnombre AND id_persona!=vidpersona;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA HAY UNA PERSONA CON ESE NUMERO DE CI Y ESE NOMBRE*persona_index';
+			ELSE
+			 UPDATE ref_persona SET id_ciudad=vidciudad, tipo_per_cod=vtipoper, per_nombre=vnombre, per_apellido=vapellido,
+			 per_nro_doc=vci, per_ruc=vruc, per_direccion=vdireccion, per_telefono=vtelefono, per_email=vcorreo, per_sexo=vsexo, 
+			 per_fecha_nacimiento=vfechanac, razon_social=vrazons, per_imagen=vimagen
+			 WHERE id_persona = vidpersona;
+			 mensaje = 'NOTICIA_/_SE HAN MODIFICADOS LOS DATOS CON EXITO*persona_index';
+			END IF;
+		END IF;
+		IF operacion = 3 THEN
+			UPDATE ref_persona SET per_estado='INACTIVO' WHERE id_persona = vidpersona AND per_nro_doc =  vci;
+			mensaje = 'NOTICIA_/_SE HA DADO DE BAJA CON EXITO*persona_index';	
+		END IF;
+		--INSERCION DE CIUDAD POR LA INTERFAZ DE PERSONA
+		IF operacion = 4 THEN
+			PERFORM * FROM ref_ciudad WHERE ciu_descri = vnombre;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE LA CIUDAD*persona_add';
+			ELSE
+				SELECT COALESCE(MAX(id_ciudad),0)+1 INTO ultimo FROM ref_ciudad;
+				INSERT INTO ref_ciudad VALUES (ultimo,vidpersona, upper(vnombre));
+				mensaje = 'NOTICIA_/_CIUDAD INSERTADA CON EXITO*persona_add';
+			END IF;
+		END IF;
+		--INSERCION DE TIPO DE PERSONA POR LA INTERFAZ DE PERSONA
+		IF operacion = 5 THEN
+			PERFORM * FROM ref_tipo_persona  WHERE tp_descri = vtipoper;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE EL TIPO DE PERSONA*persona_add';
+			ELSE
+				SELECT COALESCE(MAX(id_tipper),0)+1 INTO ultimo FROM ref_tipo_persona;
+				INSERT INTO ref_tipo_persona VALUES (ultimo, upper(vtipoper));
+				mensaje = 'NOTICIA_/_CIUDAD INSERTADA CON EXITO*persona_add';
+			END IF;
+		END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_persona(operacion integer, vidpersona integer, vidciudad integer, vtipoper integer, vnombre character varying, vapellido character varying, vci character varying, vruc character varying, vdireccion character varying, vtelefono character varying, vcorreo character varying, vsexo character varying, vfechanac date, vrazons character varying, vimagen character varying) OWNER TO postgres;
+
+--
+-- TOC entry 302 (class 1255 OID 63370)
+-- Name: sp_ref_producto(integer, integer, integer, integer, integer, integer, character varying, integer, integer, bigint, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_producto(operacion integer, codigo integer, tipopro integer, marca integer, impuesto integer, unidad integer, descripcion character varying, precioc integer, preciov integer, codigob bigint, imagen character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF operacion = 1 THEN
+			PERFORM * FROM ref_producto  WHERE pro_descri  = upper(descripcion) AND codigo_barra = codigob;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE PRODUCTO*productos_index';
+			ELSE
+				SELECT COALESCE(MAX(pro_cod),0)+1 INTO ultimo FROM ref_producto;
+				INSERT INTO ref_producto(pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen)
+				VALUES(ultimo, tipopro, marca, impuesto, unidad, upper(descripcion), precioc, preciov, 'ACTIVO',
+				 codigob, imagen);
+				mensaje = 'NOTICIA_/_AGREGADO CON EXITO*productos_index';
+			END IF;  
+		END IF;
+		IF operacion = 2 THEN
+			PERFORM * FROM ref_producto WHERE pro_cod=codigo AND mar_cod=marca AND id_tipro=tipopro AND pro_descri = upper(descripcion);
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE UN PRODUCTO CON ESAS CARACTERISTICAS*productos_index';
+			ELSE
+				UPDATE ref_producto SET id_tipro=tipopro, mar_cod=marca, id_timp=impuesto, id_um=unidad, 
+				pro_descri = upper(descripcion), precio_costo=precioc, precio_venta=preciov, codigo_barra=codigob, pro_imagen=imagen
+				WHERE pro_cod = codigo;
+				mensaje = 'NOTICIA_/_MODIFICADO CON EXITO*productos_index';
+			END IF;	
+		END IF;
+		IF operacion = 3 THEN
+			PERFORM * FROM compras_detalle WHERE pro_cod = codigo;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_NO SE PUEDE BORRAR PORQUE ESTA EN USO*productos_index';
+			ELSE
+				DELETE FROM ref_producto WHERE pro_cod = codigo;
+				mensaje = 'NOTICIA_/_BORRADO CON EXITO*productos_index';
+			END IF;
+		END IF;
+		--INSERCION DE MARCAS POR LA INTERFAZ DE PRODUCTO
+		IF operacion = 4 THEN
+			SELECT COALESCE(MAX(mar_cod),0)+1 INTO ultimo FROM ref_marca;
+			INSERT INTO ref_marca VALUES (ultimo, upper(descripcion));
+			mensaje = 'NOTICIA_/_MARCA INSERTADA CON EXITO*productos_add';
+		END IF;
+		--INSERCION DE TIPO PRODUCTO POR LA INTERFAZ DE PRODUCTO
+		IF operacion = 5 THEN
+			SELECT COALESCE(MAX(id_tipro),0)+1 INTO ultimo FROM ref_tipo_producto;
+			INSERT INTO ref_tipo_producto VALUES (ultimo, upper(descripcion));
+			mensaje = 'NOTICIA_/_TIPO DE PRODUCTO INSERTADO CON EXITO*productos_add';
+		END IF;
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_producto(operacion integer, codigo integer, tipopro integer, marca integer, impuesto integer, unidad integer, descripcion character varying, precioc integer, preciov integer, codigob bigint, imagen character varying) OWNER TO postgres;
+
+--
+-- TOC entry 303 (class 1255 OID 63371)
+-- Name: sp_ref_proveedor(integer, integer, integer, character varying, character varying, character varying, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_proveedor(operacion integer, codigo integer, ciudad integer, razon character varying, ruc character varying, telefono character varying, direccion character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF operacion = 1 THEN
+			PERFORM * FROM ref_proveedor  WHERE prv_ruc  =upper(ruc) AND prv_cod = ultimo;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE PROVEEDOR*proveedor_index';
+			ELSE
+				SELECT COALESCE(MAX(prv_cod),0)+1 INTO ultimo FROM ref_proveedor;
+				INSERT INTO ref_proveedor
+				VALUES(ultimo, ciudad, upper(razon), upper(ruc), upper(direccion), upper(telefono), 'ACTIVO');
+
+				mensaje = 'NOTICIA_/_PROVEEDOR AGREGADO CON EXITO*proveedor_index';
+			END IF;  
+		END IF;
+		IF operacion = 2 THEN
+			PERFORM * FROM ref_proveedor WHERE prv_cod = codigo AND id_ciudad = ciudad AND  prv_razon_social  = upper(razon) AND
+			prv_ruc = ruc AND prv_direccion = upper(direccion) AND prv_tel = telefono;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE UN PROVEEDOR CON ESAS CARACTERISTICAS*proveedor_index';
+			ELSE
+				UPDATE ref_proveedor SET id_ciudad=ciudad, prv_razon_social = upper(razon),
+				prv_ruc = ruc,  prv_direccion = upper(direccion), prv_tel = telefono
+				WHERE prv_cod = codigo;
+				mensaje = 'NOTICIA_/_MODIFICADO CON EXITO*proveedor_index';
+			END IF;	
+		END IF;
+		IF operacion = 3 THEN
+			PERFORM * FROM compras WHERE prv_cod = codigo;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_NO SE PUEDE BORRAR PORQUE ESTA EN USO*proveedor_index';
+			ELSE
+				DELETE FROM ref_proveedor WHERE prv_cod = codigo;
+				mensaje = 'NOTICIA_/_BORRADO CON EXITO*proveedor_index';
+			END IF;
+		END IF;
+		--INSERCION DE CIUDAD POR LA INTERFAZ DE PROVEEDOR
+		IF operacion = 4 THEN
+			SELECT COALESCE(MAX(id_ciudad),0)+1 INTO ultimo FROM ref_ciudad;
+			INSERT INTO ref_ciudad VALUES (ultimo, codigo, upper(direccion));
+			mensaje = 'NOTICIA_/_CIUDAD INSERTADA CON EXITO*proveedor_add';
+		END IF;
+		
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_proveedor(operacion integer, codigo integer, ciudad integer, razon character varying, ruc character varying, telefono character varying, direccion character varying) OWNER TO postgres;
+
+--
+-- TOC entry 304 (class 1255 OID 63372)
+-- Name: sp_ref_stock(integer, integer, integer, numeric); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_stock(operacion integer, vproducto integer, vdeposito integer, vcantidad numeric) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+	BEGIN
+		CASE operacion
+			WHEN 1 THEN
+				PERFORM * FROM ref_stock WHERE pro_cod = vproducto AND id_depo = vdeposito;
+				IF FOUND THEN
+					mensaje = 'ERROR_/_YA EXISTE ESE PRODUCTO EN ESTE DEPOSITO*stock_index';
+				ELSE
+					INSERT INTO ref_stock(pro_cod, id_depo, st_cantidad) VALUES (vproducto, vdeposito, vcantidad);
+					mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE EN EL STOCK*stock_index';
+				END IF;
+			
+			END CASE;
+			RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_stock(operacion integer, vproducto integer, vdeposito integer, vcantidad numeric) OWNER TO postgres;
+
+--
+-- TOC entry 305 (class 1255 OID 63373)
+-- Name: sp_ref_sucursal(integer, integer, integer, character varying, character varying, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_sucursal(operacion integer, codigo integer, ciudad integer, sucursal character varying, telefono character varying, direccion character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF operacion = 1 THEN
+			PERFORM * FROM ref_sucursal  WHERE suc_descri  = upper(sucursal) AND id_sucursal = ultimo;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE SUCURSAL*sucursal_index';
+			ELSE
+				SELECT COALESCE(MAX(id_sucursal),0)+1 INTO ultimo FROM ref_sucursal;
+				INSERT INTO ref_sucursal
+				VALUES(ultimo, ciudad, upper(sucursal), upper(telefono), upper(direccion));
+
+				mensaje = 'NOTICIA_/_AGREGADO CON EXITO*sucursal_index';
+			END IF;  
+		END IF;
+		IF operacion = 2 THEN
+			PERFORM * FROM ref_sucursal WHERE id_sucursal = codigo AND id_ciudad = ciudad AND  suc_descri  = upper(sucursal) AND
+			suc_telefono = upper(telefono) AND suc_direccion = upper(direccion);
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE UN PROVEEDOR CON ESAS CARACTERISTICAS*proveedor_index';
+			ELSE
+				UPDATE ref_sucursal SET  id_ciudad = ciudad, suc_descri  = upper(sucursal), 
+				suc_telefono = upper(telefono), suc_direccion = upper(direccion)
+				WHERE id_sucursal = codigo;
+				mensaje = 'NOTICIA_/_MODIFICADO CON EXITO*sucursal_index';
+			END IF;	
+		END IF;
+		IF operacion = 3 THEN
+			PERFORM * FROM ref_deposito WHERE id_sucursal = codigo;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_NO SE PUEDE BORRAR PORQUE ESTA EN USO*sucursal_index';
+			ELSE
+				DELETE FROM ref_sucursal WHERE id_sucursal = codigo;
+				mensaje = 'NOTICIA_/_BORRADO CON EXITO*sucursal_index';
+			END IF;
+		END IF;
+		--INSERCION DE CIUDAD POR LA INTERFAZ DE SUCURSAL
+		IF operacion = 4 THEN
+			SELECT COALESCE(MAX(id_ciudad),0)+1 INTO ultimo FROM ref_ciudad;
+			INSERT INTO ref_ciudad VALUES (ultimo, ciudad, upper(direccion));
+			mensaje = 'NOTICIA_/_CIUDAD INSERTADA CON EXITO*sucursal_add';
+		END IF;
+		
+		RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_sucursal(operacion integer, codigo integer, ciudad integer, sucursal character varying, telefono character varying, direccion character varying) OWNER TO postgres;
+
+--
+-- TOC entry 306 (class 1255 OID 63374)
+-- Name: sp_ref_tipo(integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_tipo(operacion integer, codigo integer, nombre character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE operacion 
+			WHEN 1 THEN
+				PERFORM * FROM ref_tipo_producto WHERE tipro_descri = upper(nombre);
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					ultimo = (SELECT COALESCE (MAX(id_tipro),0)+1 FROM ref_tipo_producto);
+					INSERT INTO ref_tipo_producto VALUES (ultimo, upper(nombre));
+						mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE';
+				END IF;
+			WHEN 2 THEN
+					PERFORM * FROM ref_tipo_producto WHERE tipro_descri = upper(nombre);
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					UPDATE ref_tipo_producto SET tipro_descri = upper(nombre) WHERE id_tipro = codigo;
+						mensaje = 'NOTICIA_/_MODIFICADO CON EXITO'; 
+			   END IF;
+			WHEN 3 THEN
+					PERFORM * FROM ref_producto WHERE id_tipro = codigo;
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_NO SE PUEDE POR QUE ESTA EN USO';
+					ELSE 
+					DELETE FROM ref_tipo_producto WHERE id_tipro = codigo;
+					mensaje = 'NOTICIA_/_BORRADO CON EXITO';
+				END IF;
+
+			END CASE;
+	RETURN mensaje;				
+	END;
+	
+$$;
+
+
+ALTER FUNCTION public.sp_ref_tipo(operacion integer, codigo integer, nombre character varying) OWNER TO postgres;
+
+--
+-- TOC entry 307 (class 1255 OID 63375)
+-- Name: sp_ref_tipo_impuesto(integer, integer, character varying, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_tipo_impuesto(operacion integer, codigo integer, descri character varying, porcent integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE operacion
+			WHEN 1 THEN
+				PERFORM * FROM ref_tipo_impuesto WHERE descripcion = upper(descri);
+				IF FOUND THEN
+					mensaje = 'ERROR_/_YA EXISTE UN TIPO DE IMPUESTO CON ESE NOMBRE';
+				ELSE
+					ultimo = (SELECT COALESCE(MAX(id_timp), 0)+1 FROM ref_tipo_impuesto);
+					INSERT INTO ref_tipo_impuesto VALUES (ultimo, upper(descri), porcent);
+					mensaje = 'NOTICIA_/_TIPO DE IMPUESTO GUARDADO EXITOSAMENTE';
+				END IF;
+			WHEN 2 THEN
+				PERFORM * FROM ref_tipo_impuesto WHERE descripcion = upper(descri) AND porcentaje = porcent;
+				IF FOUND THEN
+					mensaje = 'ERROR_/_YA EXISTE UN TIPO DE IMPUESTO CON ESE NOMBRE';
+				ELSE
+					UPDATE ref_tipo_impuesto SET descripcion = upper(descri), porcentaje = porcent WHERE id_timp = codigo; 
+					mensaje = 'NOTICIA_/_TIPO DE IMPUESTO MODIFICADO EXITOSAMENTE';
+
+				END IF;			
+			WHEN 3 THEN
+				PERFORM * FROM ref_producto WHERE id_timp = codigo;
+				IF FOUND THEN
+					mensaje = 'ERROR_/_EL TIPO DE IMPUESTO ESTÁ EN USO, NO SE PUEDE BORRAR';
+				ELSE
+					DELETE FROM ref_tipo_impuesto WHERE id_timp = codigo;
+					mensaje = 'NOTICIA_/_TIPO DE IMPUESTO BORRADO EXITOSAMENTE';
+				END IF;	
+			END CASE;
+			RETURN mensaje;
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_tipo_impuesto(operacion integer, codigo integer, descri character varying, porcent integer) OWNER TO postgres;
+
+--
+-- TOC entry 308 (class 1255 OID 63376)
+-- Name: sp_ref_tipo_persona(integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_tipo_persona(operacion integer, codigo integer, nombre character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE operacion 
+			WHEN 1 THEN
+				PERFORM * FROM ref_tipo_persona WHERE tp_descri = upper(nombre);
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					ultimo = (SELECT COALESCE (MAX(id_tipper),0)+1 FROM ref_tipo_persona);
+					INSERT INTO ref_tipo_persona VALUES (ultimo, upper(nombre));
+						mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE';
+				END IF;
+			WHEN 2 THEN
+					PERFORM * FROM ref_tipo_persona WHERE tp_descri = upper(nombre);
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					UPDATE ref_tipo_persona SET tp_descri = upper(nombre) WHERE id_tipper = codigo;
+						mensaje = 'NOTICIA_/_MODIFICADO CON EXITO'; 
+			   END IF;
+			WHEN 3 THEN
+					PERFORM * FROM ref_persona WHERE tipo_per_cod = codigo;
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_NO SE PUEDE POR QUE ESTA EN USO';
+					ELSE 
+					DELETE FROM ref_tipo_persona WHERE id_tipper = codigo;
+					mensaje = 'NOTICIA_/_BORRADO CON EXITO';
+				END IF;
+
+			END CASE;
+	RETURN mensaje;				
+	END;
+	
+$$;
+
+
+ALTER FUNCTION public.sp_ref_tipo_persona(operacion integer, codigo integer, nombre character varying) OWNER TO postgres;
+
+--
+-- TOC entry 309 (class 1255 OID 63377)
+-- Name: sp_ref_unidad(integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_unidad(operacion integer, codigo integer, nombre character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE operacion 
+			WHEN 1 THEN
+				PERFORM * FROM ref_unidadmedida WHERE descripcion = upper(nombre);
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					ultimo = (SELECT COALESCE (MAX(id_um),0)+1 FROM ref_unidadmedida);
+					INSERT INTO ref_unidadmedida VALUES (ultimo, upper(nombre));
+						mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE';
+				END IF;
+			WHEN 2 THEN
+					PERFORM * FROM ref_unidadmedida WHERE descripcion = upper(nombre);
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESE NOMBRE';
+				ELSE 
+					UPDATE ref_unidadmedida SET descripcion = upper(nombre) WHERE id_um = codigo;
+						mensaje = 'NOTICIA_/_MODIFICADO CON EXITO'; 
+			   END IF;
+			WHEN 3 THEN
+					PERFORM * FROM ref_producto WHERE id_um = codigo;
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_NO SE PUEDE POR QUE ESTA EN USO';
+					ELSE 
+					DELETE FROM ref_unidadmedida WHERE id_um = codigo;
+					mensaje = 'NOTICIA_/_BORRADO CON EXITO';
+				END IF;
+
+			END CASE;
+	RETURN mensaje;				
+	END;
+	
+$$;
+
+
+ALTER FUNCTION public.sp_ref_unidad(operacion integer, codigo integer, nombre character varying) OWNER TO postgres;
+
+--
+-- TOC entry 310 (class 1255 OID 63378)
+-- Name: sp_ref_usuario(integer, integer, character varying, character varying, integer, integer, integer, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_usuario(operacion integer, codigo integer, nick character varying, clave character varying, sucursal integer, empleado integer, grupo integer, imagen character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE 
+		mensaje VARCHAR;
+		ultimo INTEGER;
+	BEGIN
+		IF operacion = 1 THEN
+			PERFORM * FROM ref_usuario  WHERE usu_cod=codigo AND usu_nick=upper(nick) AND id_empleado=empleado;
+			IF FOUND THEN
+				mensaje = 'ERROR_/_YA EXISTE ESTE USUARIO*usuario_index';
+				
+			ELSE
+				SELECT COALESCE(MAX(usu_cod),0)+1 INTO ultimo FROM ref_usuario;
+				INSERT INTO ref_usuario(usu_cod,usu_nick,usu_clave,usu_estado,id_sucursal,id_empleado,gru_cod,usu_foto)
+				VALUES(ultimo, upper(nick),md5(clave),'ACTIVO',sucursal,empleado,grupo,imagen);
+				mensaje = 'NOTICIA_/_SE HA REGISTRADO EL USUARIO CON EXITO*usuario_index';	
+			END IF;  
+		END IF;
+		---ANULAR USUARIO SOLO SI EL USUARIO ESTA ACTIVO
+				IF operacion = 2 THEN
+				PERFORM * FROM ref_usuario WHERE usu_cod=codigo AND usu_estado='ACTIVO';
+				IF FOUND THEN
+					UPDATE ref_usuario SET usu_estado = 'ANULADO' WHERE usu_cod = codigo; 
+					mensaje = 'NOTICIA_/_USUARIO ANULADO*usuario_index';
+				ELSE
+					mensaje = 'ERROR_/_EL USUARIO NO ESTA ACTIVO*usuario_index';
+
+				END IF;	
+			END IF;
+		RETURN mensaje;
+		
+	END;
+$$;
+
+
+ALTER FUNCTION public.sp_ref_usuario(operacion integer, codigo integer, nick character varying, clave character varying, sucursal integer, empleado integer, grupo integer, imagen character varying) OWNER TO postgres;
+
+--
+-- TOC entry 311 (class 1255 OID 63379)
+-- Name: sp_ref_vehiculo(integer, integer, character varying, character varying, character varying, character varying, character varying); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION sp_ref_vehiculo(voperacion integer, vcodigo integer, vchapa character varying, vchasis character varying, vmodelo character varying, vcolor character varying, vmarca character varying) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+	DECLARE mensaje VARCHAR;
+		repetido INTEGER;
+		ultimo INTEGER;
+	BEGIN
+		CASE voperacion 
+			WHEN 1 THEN
+				PERFORM * FROM ref_vehiculo WHERE chapa = upper(vchapa);
+				IF FOUND THEN 
+					mensaje = 'ERROR_/_YA EXISTE UN VEHICULO CON  ESA CHAPA';
+				ELSE 
+					ultimo = (SELECT COALESCE (MAX(id_vehiculo),0)+1 FROM ref_vehiculo);
+					INSERT INTO ref_vehiculo VALUES (ultimo,upper(vchapa),upper(vchasis),upper(vmodelo),upper(vcolor),upper(vmarca));
+						mensaje = 'NOTICIA_/_GUARDADO EXITOSAMENTE';
+				END IF;
+			WHEN 2 THEN
+					PERFORM * FROM ref_vehiculo WHERE chapa = vchapa;
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_YA EXISTE UN REGISTRO CON ESA CHAPA';
+				ELSE 
+					UPDATE ref_vehiculo SET chapa = upper(vchapa),chasis = upper(vchasis),modelo = upper(vmodelo),color = upper(vcolor), marca = upper(vmarca) WHERE id_vehiculo = vcodigo;
+						mensaje = 'NOTICIA_/_MODIFICADO CON EXITO'; 
+			   END IF;
+			WHEN 3 THEN
+					PERFORM * FROM nota_remision WHERE id_vehiculo = vcodigo;
+					IF FOUND THEN 
+						mensaje = 'ERROR_/_NO SE PUEDE POR QUE ESTA EN USO';
+					ELSE 
+					DELETE FROM ref_vehiculo WHERE id_vehiculo = vcodigo;
+					mensaje = 'NOTICIA_/_BORRADO CON EXITO';
+				END IF;
+
+			END CASE;
+	RETURN mensaje;				
+	END;
+	
+$$;
+
+
+ALTER FUNCTION public.sp_ref_vehiculo(voperacion integer, vcodigo integer, vchapa character varying, vchasis character varying, vmodelo character varying, vcolor character varying, vmarca character varying) OWNER TO postgres;
+
+SET default_tablespace = '';
+
+SET default_with_oids = false;
+
+--
+-- TOC entry 181 (class 1259 OID 63380)
+-- Name: ajustes; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ajustes (
+    id_ajuste integer NOT NULL,
+    id_depo integer NOT NULL,
+    id_majuste integer NOT NULL,
+    usu_cod integer NOT NULL,
+    pro_cod integer NOT NULL,
+    aj_fecha timestamp without time zone NOT NULL,
+    cantidad integer NOT NULL,
+    estado character varying(50) NOT NULL
+);
+
+
+ALTER TABLE ajustes OWNER TO postgres;
+
+--
+-- TOC entry 182 (class 1259 OID 63383)
+-- Name: compras; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE compras (
+    id_compra integer NOT NULL,
+    usu_cod integer NOT NULL,
+    prv_cod integer NOT NULL,
+    id_sucursal integer NOT NULL,
+    com_fecha date,
+    com_nro_factura character varying(100) NOT NULL,
+    com_ntimbrado integer NOT NULL,
+    com_can_cuota integer,
+    com_totaliva numeric,
+    com_total numeric,
+    com_estado character varying,
+    com_condicion character varying(100) NOT NULL,
+    com_intervalo integer,
+    com_gravadas numeric NOT NULL,
+    tim_vencimiento timestamp without time zone NOT NULL,
+    nro_orden integer
+);
+
+
+ALTER TABLE compras OWNER TO postgres;
+
+--
+-- TOC entry 183 (class 1259 OID 63389)
+-- Name: compras_detalle; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE compras_detalle (
+    id_compra integer NOT NULL,
+    pro_cod integer NOT NULL,
+    id_depo integer NOT NULL,
+    cantidad integer NOT NULL,
+    precio_unit numeric,
+    subtotal numeric,
+    iva5 numeric,
+    iva10 numeric,
+    exentas numeric,
+    estado character varying
+);
+
+
+ALTER TABLE compras_detalle OWNER TO postgres;
+
+--
+-- TOC entry 184 (class 1259 OID 63395)
+-- Name: compras_pedidos; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE compras_pedidos (
+    id_pedido integer NOT NULL,
+    usu_cod integer,
+    fechac date,
+    descri character varying,
+    estado character varying
+);
+
+
+ALTER TABLE compras_pedidos OWNER TO postgres;
+
+--
+-- TOC entry 185 (class 1259 OID 63401)
+-- Name: compras_pedidos_detalle; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE compras_pedidos_detalle (
+    id_pedido integer NOT NULL,
+    pro_cod integer NOT NULL,
+    id_depo integer NOT NULL,
+    cantidad numeric,
+    precio_unit numeric,
+    subtotal numeric,
+    iva5 integer,
+    iva10 integer,
+    exentas integer
+);
+
+
+ALTER TABLE compras_pedidos_detalle OWNER TO postgres;
+
+--
+-- TOC entry 186 (class 1259 OID 63407)
+-- Name: ctas_pagar; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ctas_pagar (
+    id_cuenta integer NOT NULL,
+    id_compra integer NOT NULL,
+    cta_vto date NOT NULL,
+    cta_importe numeric(12,0) NOT NULL,
+    cta_estado character varying(10) NOT NULL,
+    cta_cuo_nro integer NOT NULL,
+    saldo numeric(12,0) NOT NULL
+);
+
+
+ALTER TABLE ctas_pagar OWNER TO postgres;
+
+--
+-- TOC entry 187 (class 1259 OID 63410)
+-- Name: detalle_credito; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE detalle_credito (
+    cod_notc integer NOT NULL,
+    pro_cod integer NOT NULL,
+    id_depo integer NOT NULL,
+    cantidad integer NOT NULL,
+    precio integer NOT NULL,
+    subtotal integer NOT NULL,
+    exentas integer NOT NULL,
+    iva5 numeric NOT NULL,
+    iva10 numeric NOT NULL
+);
+
+
+ALTER TABLE detalle_credito OWNER TO postgres;
+
+--
+-- TOC entry 188 (class 1259 OID 63416)
+-- Name: detalle_debito; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE detalle_debito (
+    id_debito integer NOT NULL,
+    id_moti integer NOT NULL,
+    id_depo integer NOT NULL,
+    pro_cod integer NOT NULL,
+    iva5 numeric,
+    iva10 numeric,
+    exentas numeric,
+    precio numeric,
+    subtotal integer,
+    cantidad numeric
+);
+
+
+ALTER TABLE detalle_debito OWNER TO postgres;
+
+--
+-- TOC entry 189 (class 1259 OID 63422)
+-- Name: detalle_orden; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE detalle_orden (
+    nro_orden integer NOT NULL,
+    id_depo integer NOT NULL,
+    pro_cod integer NOT NULL,
+    iva5 numeric NOT NULL,
+    exentas numeric NOT NULL,
+    precioc integer NOT NULL,
+    iva10 numeric NOT NULL,
+    subtotal numeric NOT NULL,
+    cantidad integer NOT NULL,
+    estado character varying(100) NOT NULL
+);
+
+
+ALTER TABLE detalle_orden OWNER TO postgres;
+
+--
+-- TOC entry 190 (class 1259 OID 63428)
+-- Name: detalle_presupuesto; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE detalle_presupuesto (
+    id_presu integer NOT NULL,
+    pro_cod integer NOT NULL,
+    id_depo integer NOT NULL,
+    cantidad numeric NOT NULL,
+    precio_unit numeric NOT NULL,
+    subtotal integer NOT NULL,
+    iva5 numeric,
+    iva10 numeric,
+    exentas numeric
+);
+
+
+ALTER TABLE detalle_presupuesto OWNER TO postgres;
+
+--
+-- TOC entry 191 (class 1259 OID 63434)
+-- Name: libro_de_compra; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE libro_de_compra (
+    id_libro integer NOT NULL,
+    id_compra integer NOT NULL,
+    nro_factura character varying(100) NOT NULL,
+    prv_cod integer NOT NULL,
+    iva5 numeric NOT NULL,
+    iva10 numeric NOT NULL,
+    exentas numeric NOT NULL,
+    total integer NOT NULL,
+    estado character varying(100) NOT NULL
+);
+
+
+ALTER TABLE libro_de_compra OWNER TO postgres;
+
+--
+-- TOC entry 192 (class 1259 OID 63440)
+-- Name: motivo_ajuste; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE motivo_ajuste (
+    id_majuste integer NOT NULL,
+    maj_descri character varying(100) NOT NULL
+);
+
+
+ALTER TABLE motivo_ajuste OWNER TO postgres;
+
+--
+-- TOC entry 193 (class 1259 OID 63443)
+-- Name: motivo_nota; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE motivo_nota (
+    id_moti integer NOT NULL,
+    descripcion character varying(100) NOT NULL
+);
+
+
+ALTER TABLE motivo_nota OWNER TO postgres;
+
+--
+-- TOC entry 194 (class 1259 OID 63446)
+-- Name: nota_de_credito; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE nota_de_credito (
+    cod_notc integer NOT NULL,
+    id_compra integer NOT NULL,
+    id_moti integer NOT NULL,
+    usu_cod integer NOT NULL,
+    prv_cod integer NOT NULL,
+    btc_fecha_sistema timestamp without time zone NOT NULL,
+    btc_monto numeric NOT NULL,
+    btc_fecha_recibido timestamp without time zone NOT NULL,
+    btc_totiva numeric NOT NULL,
+    btc_nro_fact character varying NOT NULL,
+    btc_timbrado integer NOT NULL,
+    btc_timbrado_venc timestamp without time zone NOT NULL,
+    estado character varying(100) NOT NULL
+);
+
+
+ALTER TABLE nota_de_credito OWNER TO postgres;
+
+--
+-- TOC entry 195 (class 1259 OID 63452)
+-- Name: nota_debito; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE nota_debito (
+    id_debito integer NOT NULL,
+    id_compra integer NOT NULL,
+    usu_cod integer NOT NULL,
+    prv_cod integer NOT NULL,
+    estado character varying(100) NOT NULL,
+    fecha_sistema timestamp without time zone NOT NULL,
+    fecha_recibido timestamp without time zone NOT NULL,
+    monto numeric NOT NULL,
+    total_iva numeric NOT NULL,
+    timbrado integer NOT NULL,
+    tim_vencimiento timestamp without time zone NOT NULL,
+    nro_fact character varying
+);
+
+
+ALTER TABLE nota_debito OWNER TO postgres;
+
+--
+-- TOC entry 196 (class 1259 OID 63458)
+-- Name: nota_remision; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE nota_remision (
+    id_remision integer NOT NULL,
+    id_vehiculo integer,
+    usu_cod integer,
+    id_empleado integer NOT NULL,
+    timbrado character varying,
+    fecha_inicio_traslado timestamp without time zone NOT NULL,
+    fecha_fin_traslado timestamp without time zone,
+    sucursal_salida integer,
+    sucursal_entrada integer,
+    motivo_translado character varying,
+    estado character varying
+);
+
+
+ALTER TABLE nota_remision OWNER TO postgres;
+
+--
+-- TOC entry 197 (class 1259 OID 63464)
+-- Name: orden_de_compra; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE orden_de_compra (
+    nro_orden integer NOT NULL,
+    prv_cod integer NOT NULL,
+    id_presu integer,
+    fecha date NOT NULL,
+    iva_total integer NOT NULL,
+    totalo integer NOT NULL,
+    estado character varying(100) NOT NULL,
+    usu_cod integer NOT NULL
+);
+
+
+ALTER TABLE orden_de_compra OWNER TO postgres;
+
+--
+-- TOC entry 198 (class 1259 OID 63467)
+-- Name: presupuesto; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE presupuesto (
+    id_presu integer NOT NULL,
+    prv_cod integer NOT NULL,
+    id_pedido integer NOT NULL,
+    usu_cod integer NOT NULL,
+    total numeric NOT NULL,
+    estado character varying(100) NOT NULL,
+    validez date,
+    fecha date
+);
+
+
+ALTER TABLE presupuesto OWNER TO postgres;
+
+--
+-- TOC entry 199 (class 1259 OID 63473)
+-- Name: ref_cargos; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_cargos (
+    id_cargo integer NOT NULL,
+    car_descri character varying(30)
+);
+
+
+ALTER TABLE ref_cargos OWNER TO postgres;
+
+--
+-- TOC entry 200 (class 1259 OID 63476)
+-- Name: ref_ciudad; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_ciudad (
+    id_ciudad integer NOT NULL,
+    id_pais integer NOT NULL,
+    ciu_descri character varying(30)
+);
+
+
+ALTER TABLE ref_ciudad OWNER TO postgres;
+
+--
+-- TOC entry 201 (class 1259 OID 63479)
+-- Name: ref_cliente; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_cliente (
+    id_cliente integer NOT NULL,
+    id_persona integer NOT NULL,
+    cli_ci character varying NOT NULL,
+    nombres character varying,
+    estado character varying(20)
+);
+
+
+ALTER TABLE ref_cliente OWNER TO postgres;
+
+--
+-- TOC entry 202 (class 1259 OID 63485)
+-- Name: ref_deposito; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_deposito (
+    id_depo integer NOT NULL,
+    id_sucursal integer NOT NULL,
+    dep_descri character varying(30)
+);
+
+
+ALTER TABLE ref_deposito OWNER TO postgres;
+
+--
+-- TOC entry 203 (class 1259 OID 63488)
+-- Name: ref_empleado; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_empleado (
+    id_empleado integer NOT NULL,
+    id_persona integer NOT NULL,
+    id_cargo integer NOT NULL,
+    id_sucursal integer NOT NULL,
+    estado character varying
+);
+
+
+ALTER TABLE ref_empleado OWNER TO postgres;
+
+--
+-- TOC entry 204 (class 1259 OID 63494)
+-- Name: ref_grupos; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_grupos (
+    gru_cod integer NOT NULL,
+    gru_nombre character varying(40) NOT NULL
+);
+
+
+ALTER TABLE ref_grupos OWNER TO postgres;
+
+--
+-- TOC entry 205 (class 1259 OID 63497)
+-- Name: ref_marca; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_marca (
+    mar_cod integer NOT NULL,
+    mar_descri character varying(30)
+);
+
+
+ALTER TABLE ref_marca OWNER TO postgres;
+
+--
+-- TOC entry 206 (class 1259 OID 63500)
+-- Name: ref_modulos; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_modulos (
+    mod_cod integer NOT NULL,
+    mod_nombre character varying(50) NOT NULL
+);
+
+
+ALTER TABLE ref_modulos OWNER TO postgres;
+
+--
+-- TOC entry 207 (class 1259 OID 63503)
+-- Name: ref_paginas; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_paginas (
+    pag_cod integer NOT NULL,
+    pag_direc character varying(120) NOT NULL,
+    pag_nombre character varying(80) NOT NULL,
+    mod_cod integer NOT NULL
+);
+
+
+ALTER TABLE ref_paginas OWNER TO postgres;
+
+--
+-- TOC entry 208 (class 1259 OID 63506)
+-- Name: ref_pais; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_pais (
+    id_pais integer NOT NULL,
+    pai_descri character varying(30)
+);
+
+
+ALTER TABLE ref_pais OWNER TO postgres;
+
+--
+-- TOC entry 209 (class 1259 OID 63509)
+-- Name: ref_permisos; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_permisos (
+    pag_cod integer NOT NULL,
+    gru_cod integer NOT NULL,
+    leer boolean,
+    insertar boolean,
+    editar boolean,
+    borrar boolean,
+    auditoria character varying
+);
+
+
+ALTER TABLE ref_permisos OWNER TO postgres;
+
+--
+-- TOC entry 210 (class 1259 OID 63515)
+-- Name: ref_persona; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_persona (
+    id_persona integer NOT NULL,
+    id_ciudad integer NOT NULL,
+    tipo_per_cod integer NOT NULL,
+    per_nombre character varying(30),
+    per_apellido character varying(30),
+    per_nro_doc character varying(30),
+    per_ruc character varying(20),
+    per_direccion character varying(30),
+    per_telefono character varying(30),
+    per_email character varying,
+    per_sexo character varying(30),
+    per_fecha_nacimiento date,
+    razon_social character varying,
+    per_estado character varying,
+    per_imagen character varying
+);
+
+
+ALTER TABLE ref_persona OWNER TO postgres;
+
+--
+-- TOC entry 211 (class 1259 OID 63521)
+-- Name: ref_producto; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_producto (
+    pro_cod integer NOT NULL,
+    id_tipro integer NOT NULL,
+    mar_cod integer NOT NULL,
+    id_timp integer NOT NULL,
+    id_um integer NOT NULL,
+    pro_descri character varying(250),
+    precio_costo integer,
+    precio_venta integer,
+    pro_estado character varying(15),
+    codigo_barra integer,
+    pro_imagen character varying(100)
+);
+
+
+ALTER TABLE ref_producto OWNER TO postgres;
+
+--
+-- TOC entry 2685 (class 0 OID 0)
+-- Dependencies: 211
+-- Name: COLUMN ref_producto.pro_imagen; Type: COMMENT; Schema: public; Owner: postgres
+--
+
+COMMENT ON COLUMN ref_producto.pro_imagen IS '
+';
+
+
+--
+-- TOC entry 212 (class 1259 OID 63524)
+-- Name: ref_proveedor; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_proveedor (
+    prv_cod integer NOT NULL,
+    id_ciudad integer NOT NULL,
+    prv_razon_social character varying(30),
+    prv_ruc character varying(15),
+    prv_direccion character varying(100),
+    prv_tel character varying(30),
+    prv_estado character varying(30)
+);
+
+
+ALTER TABLE ref_proveedor OWNER TO postgres;
+
+--
+-- TOC entry 213 (class 1259 OID 63527)
+-- Name: ref_stock; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_stock (
+    pro_cod integer NOT NULL,
+    id_depo integer NOT NULL,
+    st_cantidad numeric
+);
+
+
+ALTER TABLE ref_stock OWNER TO postgres;
+
+--
+-- TOC entry 214 (class 1259 OID 63533)
+-- Name: ref_sucursal; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_sucursal (
+    id_sucursal integer NOT NULL,
+    id_ciudad integer NOT NULL,
+    suc_descri character varying(30),
+    suc_telefono character varying(30),
+    suc_direccion character varying(30)
+);
+
+
+ALTER TABLE ref_sucursal OWNER TO postgres;
+
+--
+-- TOC entry 215 (class 1259 OID 63536)
+-- Name: ref_tipo_impuesto; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_tipo_impuesto (
+    id_timp integer NOT NULL,
+    descripcion character varying(30),
+    porcentaje integer
+);
+
+
+ALTER TABLE ref_tipo_impuesto OWNER TO postgres;
+
+--
+-- TOC entry 216 (class 1259 OID 63539)
+-- Name: ref_tipo_persona; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_tipo_persona (
+    id_tipper integer NOT NULL,
+    tp_descri character varying(30)
+);
+
+
+ALTER TABLE ref_tipo_persona OWNER TO postgres;
+
+--
+-- TOC entry 217 (class 1259 OID 63542)
+-- Name: ref_tipo_producto; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_tipo_producto (
+    id_tipro integer NOT NULL,
+    tipro_descri character varying(30)
+);
+
+
+ALTER TABLE ref_tipo_producto OWNER TO postgres;
+
+--
+-- TOC entry 218 (class 1259 OID 63545)
+-- Name: ref_unidadmedida; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_unidadmedida (
+    id_um integer NOT NULL,
+    descripcion character varying(30)
+);
+
+
+ALTER TABLE ref_unidadmedida OWNER TO postgres;
+
+--
+-- TOC entry 219 (class 1259 OID 63548)
+-- Name: ref_usuario; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_usuario (
+    usu_cod integer NOT NULL,
+    usu_nick character varying(100) NOT NULL,
+    usu_clave character varying(100) NOT NULL,
+    usu_estado character varying(50) NOT NULL,
+    id_sucursal integer NOT NULL,
+    id_empleado integer NOT NULL,
+    gru_cod integer NOT NULL,
+    usu_foto character varying,
+    intentos integer,
+    fecha_intento date,
+    auditoria character varying
+);
+
+
+ALTER TABLE ref_usuario OWNER TO postgres;
+
+--
+-- TOC entry 220 (class 1259 OID 63554)
+-- Name: ref_vehiculo; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE ref_vehiculo (
+    id_vehiculo integer NOT NULL,
+    chapa character varying NOT NULL,
+    chasis character varying NOT NULL,
+    modelo character varying NOT NULL,
+    color character varying NOT NULL,
+    marca character varying NOT NULL
+);
+
+
+ALTER TABLE ref_vehiculo OWNER TO postgres;
+
+--
+-- TOC entry 221 (class 1259 OID 63560)
+-- Name: remision_ndetalle; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE remision_ndetalle (
+    id_remision integer NOT NULL,
+    pro_cod integer NOT NULL,
+    id_depo integer NOT NULL,
+    cantidad numeric,
+    cod_depo_destino integer
+);
+
+
+ALTER TABLE remision_ndetalle OWNER TO postgres;
+
+--
+-- TOC entry 222 (class 1259 OID 63566)
+-- Name: v_ajustes; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ajustes AS
+ SELECT a.id_ajuste,
+    a.id_depo,
+    b.dep_descri,
+    a.id_majuste,
+    e.maj_descri,
+    a.usu_cod,
+    d.usu_nick,
+    a.pro_cod,
+    c.pro_descri,
+    a.aj_fecha,
+    a.cantidad,
+    a.estado,
+    to_char((a.aj_fecha)::timestamp with time zone, 'DD/MM/YYYY'::text) AS fecha_ajuste,
+    to_char((a.aj_fecha)::timestamp with time zone, 'TMDay, DD "de" TMMonth "del" yyyy'::text) AS fecha_ajus1
+   FROM ((((ajustes a
+     JOIN ref_deposito b ON ((a.id_depo = b.id_depo)))
+     JOIN ref_producto c ON ((a.pro_cod = c.pro_cod)))
+     JOIN ref_usuario d ON ((a.usu_cod = d.usu_cod)))
+     JOIN motivo_ajuste e ON ((a.id_majuste = e.id_majuste)));
+
+
+ALTER TABLE v_ajustes OWNER TO postgres;
+
+--
+-- TOC entry 223 (class 1259 OID 63571)
+-- Name: v_compra_orden; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_compra_orden AS
+ SELECT a.nro_orden,
+    b.pro_cod,
+    b.id_depo,
+    b.cantidad,
+    b.subtotal,
+    b.precioc,
+    a.id_compra,
+    d.pro_descri,
+    e.dep_descri
+   FROM ((((compras a
+     JOIN orden_de_compra c ON ((a.nro_orden = c.nro_orden)))
+     JOIN detalle_orden b ON ((b.nro_orden = c.nro_orden)))
+     JOIN ref_producto d ON ((b.pro_cod = d.pro_cod)))
+     JOIN ref_deposito e ON ((b.id_depo = e.id_depo)));
+
+
+ALTER TABLE v_compra_orden OWNER TO postgres;
+
+--
+-- TOC entry 224 (class 1259 OID 63576)
+-- Name: v_compras; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_compras AS
+ SELECT a.id_compra,
+    a.usu_cod,
+    b.usu_nick,
+    a.prv_cod,
+    c.prv_razon_social,
+    a.id_sucursal,
+    d.suc_descri,
+    a.com_fecha,
+    a.com_nro_factura,
+    a.com_ntimbrado,
+    a.com_can_cuota,
+    a.com_totaliva,
+    a.com_total,
+    a.com_estado,
+    a.com_condicion,
+    a.com_intervalo,
+    a.com_gravadas,
+    a.tim_vencimiento,
+    a.nro_orden,
+    to_char((a.com_fecha)::timestamp with time zone, 'DD/MM/YYYY'::text) AS fecha_compra,
+    to_char((a.com_fecha)::timestamp with time zone, 'TMDay, DD "de" TMMonth "del" yyy'::text) AS fecha_compra1
+   FROM (((compras a
+     JOIN ref_usuario b ON ((a.usu_cod = b.usu_cod)))
+     JOIN ref_proveedor c ON ((a.prv_cod = c.prv_cod)))
+     JOIN ref_sucursal d ON ((a.id_sucursal = d.id_sucursal)));
+
+
+ALTER TABLE v_compras OWNER TO postgres;
+
+--
+-- TOC entry 225 (class 1259 OID 63581)
+-- Name: v_compras_pedido; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_compras_pedido AS
+ SELECT a.id_pedido,
+    a.usu_cod,
+    a.fechac,
+    a.descri,
+    a.estado,
+    b.usu_nick,
+    to_char((a.fechac)::timestamp with time zone, 'DD/MM/YYYY'::text) AS fecha_pedido,
+    to_char((a.fechac)::timestamp with time zone, 'TMDay, DD "de" TMMonth "del" yyyy'::text) AS fecha_pedido1
+   FROM (compras_pedidos a
+     JOIN ref_usuario b ON ((a.usu_cod = b.usu_cod)));
+
+
+ALTER TABLE v_compras_pedido OWNER TO postgres;
+
+--
+-- TOC entry 226 (class 1259 OID 63585)
+-- Name: v_compras_pedidos_detalle; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_compras_pedidos_detalle AS
+ SELECT a.id_pedido,
+    a.pro_cod,
+    b.pro_descri,
+    a.id_depo,
+    c.dep_descri,
+    a.cantidad,
+    a.precio_unit,
+    a.subtotal
+   FROM ((compras_pedidos_detalle a
+     JOIN ref_producto b ON ((a.pro_cod = b.pro_cod)))
+     JOIN ref_deposito c ON ((a.id_depo = c.id_depo)));
+
+
+ALTER TABLE v_compras_pedidos_detalle OWNER TO postgres;
+
+--
+-- TOC entry 227 (class 1259 OID 63590)
+-- Name: v_cuentas; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_cuentas AS
+ SELECT a.id_cuenta,
+    a.id_compra,
+    a.cta_vto,
+    a.cta_importe,
+    a.cta_estado,
+    a.cta_cuo_nro,
+    a.saldo,
+    b.com_nro_factura,
+    b.usu_cod,
+    b.prv_cod,
+    c.prv_razon_social,
+    to_char((a.cta_vto)::timestamp with time zone, 'DD/MM/YYYY'::text) AS fecha_vencimiento,
+    to_char((a.cta_vto)::timestamp with time zone, 'TMDay, DD "de" TMMonth "del" yyyy'::text) AS fecha_vencimiento1
+   FROM ((ctas_pagar a
+     JOIN compras b ON ((b.id_compra = a.id_compra)))
+     JOIN ref_proveedor c ON ((b.prv_cod = c.prv_cod)));
+
+
+ALTER TABLE v_cuentas OWNER TO postgres;
+
+--
+-- TOC entry 228 (class 1259 OID 63595)
+-- Name: v_detalle_compras; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_detalle_compras AS
+ SELECT a.id_compra,
+    a.pro_cod,
+    b.pro_descri,
+    a.id_depo,
+    c.dep_descri,
+    a.cantidad,
+    a.precio_unit,
+    a.subtotal,
+    a.iva5,
+    a.iva10,
+    a.exentas,
+    a.estado
+   FROM ((compras_detalle a
+     JOIN ref_producto b ON ((a.pro_cod = b.pro_cod)))
+     JOIN ref_deposito c ON ((a.id_depo = c.id_depo)));
+
+
+ALTER TABLE v_detalle_compras OWNER TO postgres;
+
+--
+-- TOC entry 229 (class 1259 OID 63600)
+-- Name: v_detalle_credito; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_detalle_credito AS
+ SELECT a.cod_notc,
+    a.pro_cod,
+    b.pro_descri,
+    a.id_depo,
+    c.dep_descri,
+    a.cantidad,
+    a.precio,
+    a.subtotal,
+    a.exentas,
+    a.iva5,
+    a.iva10
+   FROM ((detalle_credito a
+     JOIN ref_producto b ON ((a.pro_cod = b.pro_cod)))
+     JOIN ref_deposito c ON ((a.id_depo = c.id_depo)));
+
+
+ALTER TABLE v_detalle_credito OWNER TO postgres;
+
+--
+-- TOC entry 230 (class 1259 OID 63605)
+-- Name: v_detalle_debito; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_detalle_debito AS
+ SELECT a.id_debito,
+    a.id_moti,
+    b.descripcion,
+    a.id_depo,
+    c.dep_descri,
+    a.pro_cod,
+    d.pro_descri,
+    a.iva5,
+    a.iva10,
+    a.exentas,
+    a.precio,
+    a.subtotal,
+    a.cantidad
+   FROM (((detalle_debito a
+     JOIN motivo_nota b ON ((a.id_moti = b.id_moti)))
+     JOIN ref_producto d ON ((a.pro_cod = d.pro_cod)))
+     JOIN ref_deposito c ON ((a.id_depo = c.id_depo)));
+
+
+ALTER TABLE v_detalle_debito OWNER TO postgres;
+
+--
+-- TOC entry 231 (class 1259 OID 63610)
+-- Name: v_detalle_presupuesto; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_detalle_presupuesto AS
+ SELECT a.id_presu,
+    a.pro_cod,
+    b.pro_descri,
+    a.id_depo,
+    c.dep_descri,
+    a.cantidad,
+    a.precio_unit,
+    a.subtotal,
+    a.iva5,
+    a.iva10,
+    a.exentas,
+    d.id_pedido AS pedido
+   FROM (((detalle_presupuesto a
+     JOIN ref_producto b ON ((a.pro_cod = b.pro_cod)))
+     JOIN ref_deposito c ON ((a.id_depo = c.id_depo)))
+     JOIN presupuesto d ON ((a.id_presu = d.id_presu)));
+
+
+ALTER TABLE v_detalle_presupuesto OWNER TO postgres;
+
+--
+-- TOC entry 232 (class 1259 OID 63615)
+-- Name: v_detalle_remision; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_detalle_remision AS
+ SELECT a.id_remision,
+    a.pro_cod,
+    b.pro_descri,
+    a.id_depo,
+    c.dep_descri,
+    a.cantidad,
+    a.cod_depo_destino,
+    d.dep_descri AS dep_destino
+   FROM (((remision_ndetalle a
+     JOIN ref_producto b ON ((a.pro_cod = b.pro_cod)))
+     JOIN ref_deposito c ON ((a.id_depo = c.id_depo)))
+     JOIN ref_deposito d ON ((a.cod_depo_destino = d.id_depo)));
+
+
+ALTER TABLE v_detalle_remision OWNER TO postgres;
+
+--
+-- TOC entry 233 (class 1259 OID 63620)
+-- Name: v_libros; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_libros AS
+ SELECT a.id_libro,
+    a.id_compra,
+    b.usu_nick,
+    c.com_fecha,
+    a.nro_factura,
+    a.prv_cod,
+    d.prv_razon_social,
+    a.iva5,
+    a.iva10,
+    a.exentas,
+    a.total,
+    a.estado
+   FROM (((libro_de_compra a
+     JOIN compras c ON ((a.id_compra = c.id_compra)))
+     JOIN ref_usuario b ON ((c.usu_cod = b.usu_cod)))
+     JOIN ref_proveedor d ON ((a.prv_cod = d.prv_cod)));
+
+
+ALTER TABLE v_libros OWNER TO postgres;
+
+--
+-- TOC entry 234 (class 1259 OID 63625)
+-- Name: v_nota_de_credito; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_nota_de_credito AS
+ SELECT a.cod_notc,
+    a.id_compra,
+    a.id_moti,
+    b.descripcion,
+    a.usu_cod,
+    c.usu_nick,
+    a.prv_cod,
+    d.prv_razon_social,
+    a.btc_fecha_sistema,
+    a.btc_monto,
+    a.btc_fecha_recibido,
+    a.btc_totiva,
+    a.btc_nro_fact,
+    a.btc_timbrado,
+    to_char((a.btc_fecha_sistema)::timestamp with time zone, 'TMDay, DD "de" TMMonth "del" yyyy'::text) AS fecha_sistema1,
+    a.btc_timbrado_venc,
+    a.estado
+   FROM (((nota_de_credito a
+     JOIN motivo_nota b ON ((a.id_moti = b.id_moti)))
+     JOIN ref_usuario c ON ((a.usu_cod = c.usu_cod)))
+     JOIN ref_proveedor d ON ((a.prv_cod = d.prv_cod)));
+
+
+ALTER TABLE v_nota_de_credito OWNER TO postgres;
+
+--
+-- TOC entry 235 (class 1259 OID 63630)
+-- Name: v_nota_debito; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_nota_debito AS
+ SELECT a.id_debito,
+    a.id_compra,
+    a.usu_cod,
+    a.prv_cod,
+    a.estado,
+    a.fecha_sistema,
+    a.fecha_recibido,
+    a.monto,
+    a.total_iva,
+    a.nro_fact,
+    a.timbrado,
+    a.tim_vencimiento,
+    b.prv_razon_social,
+    c.usu_nick,
+    to_char((a.fecha_sistema)::timestamp with time zone, 'TMDay, DD "de" TMMonth "del" yyyy'::text) AS fecha_sistema1,
+    to_char((a.tim_vencimiento)::timestamp with time zone, 'DD/MM/YYYY'::text) AS fecha_timb_vencimiento,
+    to_char((a.tim_vencimiento)::timestamp with time zone, 'TMDay, DD "de" TMMonth "del" yyy'::text) AS fecha_timb_vencimiento1
+   FROM ((nota_debito a
+     JOIN ref_proveedor b ON ((a.prv_cod = b.prv_cod)))
+     JOIN ref_usuario c ON ((a.usu_cod = c.usu_cod)));
+
+
+ALTER TABLE v_nota_debito OWNER TO postgres;
+
+--
+-- TOC entry 236 (class 1259 OID 63635)
+-- Name: v_nota_remision; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_nota_remision AS
+ SELECT a.id_remision,
+    a.id_vehiculo,
+    b.chasis,
+    a.usu_cod,
+    c.usu_nick,
+    a.id_empleado,
+    concat((((d.per_nombre)::text || '    '::text) || (d.per_apellido)::text)) AS nombres,
+    d.per_telefono,
+    d.per_nro_doc,
+    a.timbrado,
+    a.fecha_inicio_traslado,
+    a.fecha_fin_traslado,
+    to_char((a.fecha_inicio_traslado)::timestamp with time zone, 'TMDay, DD "de" TMMonth "del" yyyy'::text) AS fecha_inicio,
+    to_char((a.fecha_fin_traslado)::timestamp with time zone, 'TMDay, DD "de" TMMonth "del" yyyy'::text) AS fecha_fin,
+    a.sucursal_salida,
+    e.suc_descri,
+    a.sucursal_entrada,
+    f.suc_descri AS suc_destino,
+    a.motivo_translado,
+    a.estado,
+    concat((((b.chapa)::text || '    '::text) || (b.chasis)::text)) AS auto
+   FROM ((((((nota_remision a
+     JOIN ref_vehiculo b ON ((a.id_vehiculo = b.id_vehiculo)))
+     JOIN ref_usuario c ON ((a.usu_cod = c.usu_cod)))
+     JOIN ref_empleado g ON ((a.id_empleado = g.id_empleado)))
+     JOIN ref_persona d ON ((g.id_persona = d.id_persona)))
+     JOIN ref_sucursal e ON ((a.sucursal_salida = e.id_sucursal)))
+     JOIN ref_sucursal f ON ((a.sucursal_entrada = f.id_sucursal)));
+
+
+ALTER TABLE v_nota_remision OWNER TO postgres;
+
+--
+-- TOC entry 237 (class 1259 OID 63640)
+-- Name: v_orden_de_compra; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_orden_de_compra AS
+ SELECT a.id_presu,
+    a.nro_orden,
+    a.prv_cod,
+    a.fecha,
+    a.iva_total,
+    a.totalo,
+    a.estado,
+    a.usu_cod,
+    b.prv_razon_social,
+    c.usu_nick,
+    to_char((a.fecha)::timestamp with time zone, 'DD/MM/YYYY'::text) AS fecha_orden,
+    to_char((a.fecha)::timestamp with time zone, 'TMDay,DD "de" TMMonth "del" yyyy'::text) AS fecha_orden1
+   FROM ((orden_de_compra a
+     JOIN ref_proveedor b ON ((a.prv_cod = b.prv_cod)))
+     JOIN ref_usuario c ON ((a.usu_cod = c.usu_cod)));
+
+
+ALTER TABLE v_orden_de_compra OWNER TO postgres;
+
+--
+-- TOC entry 238 (class 1259 OID 63645)
+-- Name: v_orden_detalle; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_orden_detalle AS
+ SELECT a.nro_orden,
+    a.id_depo,
+    a.pro_cod,
+    a.iva5,
+    a.exentas,
+    a.precioc,
+    a.iva10,
+    a.subtotal,
+    a.cantidad,
+    a.estado,
+    b.dep_descri,
+    c.pro_descri
+   FROM ((detalle_orden a
+     JOIN ref_deposito b ON ((a.id_depo = b.id_depo)))
+     JOIN ref_producto c ON ((a.pro_cod = c.pro_cod)));
+
+
+ALTER TABLE v_orden_detalle OWNER TO postgres;
+
+--
+-- TOC entry 239 (class 1259 OID 63650)
+-- Name: v_orden_presupuesto; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_orden_presupuesto AS
+ SELECT a.id_presu,
+    b.pro_cod,
+    b.id_depo,
+    b.cantidad,
+    b.subtotal,
+    b.precio_unit,
+    a.nro_orden,
+    d.pro_descri,
+    e.dep_descri
+   FROM ((((orden_de_compra a
+     JOIN presupuesto c ON ((a.id_presu = c.id_presu)))
+     JOIN detalle_presupuesto b ON ((b.id_presu = c.id_presu)))
+     JOIN ref_producto d ON ((b.pro_cod = d.pro_cod)))
+     JOIN ref_deposito e ON ((b.id_depo = e.id_depo)));
+
+
+ALTER TABLE v_orden_presupuesto OWNER TO postgres;
+
+--
+-- TOC entry 240 (class 1259 OID 63655)
+-- Name: v_permisos; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_permisos AS
+ SELECT a.pag_cod,
+    a.gru_cod,
+    a.leer,
+    a.insertar,
+    a.editar,
+    a.borrar,
+    a.auditoria,
+    b.gru_nombre,
+    c.pag_nombre,
+    c.pag_direc,
+    d.mod_cod,
+    d.mod_nombre
+   FROM ref_permisos a,
+    ref_grupos b,
+    ref_paginas c,
+    ref_modulos d
+  WHERE ((a.gru_cod = b.gru_cod) AND (a.pag_cod = c.pag_cod) AND (c.mod_cod = d.mod_cod));
+
+
+ALTER TABLE v_permisos OWNER TO postgres;
+
+--
+-- TOC entry 241 (class 1259 OID 63659)
+-- Name: v_presupuesto; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_presupuesto AS
+ SELECT a.id_presu,
+    a.prv_cod,
+    b.prv_razon_social,
+    a.id_pedido,
+    a.usu_cod,
+    d.id_empleado,
+    concat((((c.per_nombre)::text || ' '::text) || (c.per_apellido)::text)) AS empleado,
+    a.validez,
+    a.fecha,
+    a.total,
+    a.estado,
+    to_char((a.fecha)::timestamp with time zone, 'DD/MM/YYYY'::text) AS fecha_pedido,
+    to_char((a.fecha)::timestamp with time zone, 'TMDay,DD "de" TMMonth "del" yyyy'::text) AS fecha_pedido1,
+    g.descri,
+    g.fechac
+   FROM (((((presupuesto a
+     JOIN ref_proveedor b ON ((a.prv_cod = b.prv_cod)))
+     JOIN ref_usuario d ON ((a.usu_cod = d.usu_cod)))
+     JOIN ref_empleado e ON ((d.id_empleado = e.id_empleado)))
+     JOIN ref_persona c ON ((e.id_persona = c.id_persona)))
+     JOIN compras_pedidos g ON ((a.id_pedido = g.id_pedido)));
+
+
+ALTER TABLE v_presupuesto OWNER TO postgres;
+
+--
+-- TOC entry 242 (class 1259 OID 63664)
+-- Name: v_ref_ciudad; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_ciudad AS
+ SELECT a.id_ciudad,
+    a.ciu_descri,
+    a.id_pais,
+    b.pai_descri
+   FROM (ref_ciudad a
+     JOIN ref_pais b ON ((a.id_pais = b.id_pais)));
+
+
+ALTER TABLE v_ref_ciudad OWNER TO postgres;
+
+--
+-- TOC entry 243 (class 1259 OID 63668)
+-- Name: v_ref_cliente; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_cliente AS
+ SELECT a.id_cliente,
+    a.id_persona,
+    b.per_nombre,
+    a.cli_ci,
+    a.nombres,
+    a.estado
+   FROM (ref_cliente a
+     JOIN ref_persona b ON ((a.id_persona = b.id_persona)));
+
+
+ALTER TABLE v_ref_cliente OWNER TO postgres;
+
+--
+-- TOC entry 244 (class 1259 OID 63672)
+-- Name: v_ref_deposito; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_deposito AS
+ SELECT a.id_depo,
+    a.id_sucursal,
+    b.suc_descri AS sucursal,
+    a.dep_descri
+   FROM (ref_deposito a
+     JOIN ref_sucursal b ON ((a.id_sucursal = b.id_sucursal)));
+
+
+ALTER TABLE v_ref_deposito OWNER TO postgres;
+
+--
+-- TOC entry 245 (class 1259 OID 63676)
+-- Name: v_ref_empleado; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_empleado AS
+ SELECT a.id_empleado,
+    a.id_persona,
+    b.per_nombre,
+    b.per_apellido,
+    b.per_nro_doc,
+    b.per_telefono,
+    a.id_cargo,
+    c.car_descri,
+    a.id_sucursal,
+    d.suc_descri,
+    a.estado,
+    concat((((b.per_nombre)::text || ' '::text) || (b.per_apellido)::text)) AS nombre
+   FROM (((ref_empleado a
+     JOIN ref_persona b ON ((a.id_persona = b.id_persona)))
+     JOIN ref_cargos c ON ((a.id_cargo = c.id_cargo)))
+     JOIN ref_sucursal d ON ((a.id_sucursal = d.id_sucursal)));
+
+
+ALTER TABLE v_ref_empleado OWNER TO postgres;
+
+--
+-- TOC entry 246 (class 1259 OID 63681)
+-- Name: v_ref_persona; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_persona AS
+ SELECT a.id_persona,
+    a.per_nombre,
+    a.per_apellido,
+    a.per_nro_doc,
+    a.per_ruc,
+    a.per_direccion,
+    a.per_telefono,
+    a.per_email,
+    a.per_sexo,
+    a.per_fecha_nacimiento,
+    a.razon_social,
+    a.per_estado,
+    a.per_imagen,
+    b.id_ciudad,
+    b.ciu_descri,
+    c.id_tipper,
+    c.tp_descri
+   FROM ((ref_persona a
+     JOIN ref_ciudad b ON ((a.id_ciudad = b.id_ciudad)))
+     JOIN ref_tipo_persona c ON ((a.tipo_per_cod = c.id_tipper)));
+
+
+ALTER TABLE v_ref_persona OWNER TO postgres;
+
+--
+-- TOC entry 247 (class 1259 OID 63686)
+-- Name: v_ref_producto; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_producto AS
+ SELECT a.pro_cod,
+    a.id_tipro,
+    b.tipro_descri,
+    a.mar_cod,
+    c.mar_descri,
+    a.id_timp,
+    d.descripcion AS impuesto,
+    a.id_um,
+    e.descripcion AS unidadmedida,
+    a.pro_descri,
+    a.precio_costo,
+    a.precio_venta,
+    a.pro_estado,
+    a.codigo_barra,
+    a.pro_imagen
+   FROM ((((ref_producto a
+     JOIN ref_tipo_producto b ON ((a.id_tipro = b.id_tipro)))
+     JOIN ref_marca c ON ((a.mar_cod = c.mar_cod)))
+     JOIN ref_tipo_impuesto d ON ((a.id_timp = d.id_timp)))
+     LEFT JOIN ref_unidadmedida e ON ((a.id_um = e.id_um)));
+
+
+ALTER TABLE v_ref_producto OWNER TO postgres;
+
+--
+-- TOC entry 248 (class 1259 OID 63691)
+-- Name: v_ref_proveedor; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_proveedor AS
+ SELECT a.prv_cod,
+    a.id_ciudad,
+    b.ciu_descri,
+    a.prv_razon_social,
+    a.prv_ruc,
+    a.prv_direccion,
+    a.prv_tel,
+    a.prv_estado
+   FROM (ref_proveedor a
+     JOIN ref_ciudad b ON ((a.id_ciudad = b.id_ciudad)));
+
+
+ALTER TABLE v_ref_proveedor OWNER TO postgres;
+
+--
+-- TOC entry 249 (class 1259 OID 63695)
+-- Name: v_ref_stock; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_stock AS
+ SELECT a.pro_cod,
+    a.id_depo,
+    a.st_cantidad,
+    b.pro_descri,
+    c.dep_descri
+   FROM ((ref_stock a
+     JOIN ref_producto b ON ((a.pro_cod = b.pro_cod)))
+     JOIN ref_deposito c ON ((a.id_depo = c.id_depo)));
+
+
+ALTER TABLE v_ref_stock OWNER TO postgres;
+
+--
+-- TOC entry 250 (class 1259 OID 63699)
+-- Name: v_ref_sucursal; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_sucursal AS
+ SELECT a.id_sucursal,
+    a.id_ciudad,
+    b.ciu_descri,
+    a.suc_descri,
+    a.suc_telefono,
+    a.suc_direccion
+   FROM (ref_sucursal a
+     JOIN ref_ciudad b ON ((a.id_ciudad = b.id_ciudad)));
+
+
+ALTER TABLE v_ref_sucursal OWNER TO postgres;
+
+--
+-- TOC entry 251 (class 1259 OID 63703)
+-- Name: v_ref_usuario; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW v_ref_usuario AS
+ SELECT a.usu_cod,
+    a.usu_nick,
+    a.usu_clave,
+    a.usu_estado,
+    a.id_sucursal,
+    a.id_empleado,
+    a.gru_cod,
+    a.usu_foto,
+    a.intentos,
+    a.fecha_intento,
+    a.auditoria,
+    b.suc_descri,
+    d.gru_nombre,
+    c.per_nro_doc,
+    (((c.per_nombre)::text || ' '::text) || (c.per_apellido)::text) AS persona
+   FROM ((((ref_usuario a
+     JOIN ref_empleado e ON ((a.id_empleado = e.id_empleado)))
+     JOIN ref_persona c ON ((c.id_persona = e.id_persona)))
+     JOIN ref_sucursal b ON ((b.id_sucursal = a.id_sucursal)))
+     JOIN ref_grupos d ON ((d.gru_cod = a.gru_cod)));
+
+
+ALTER TABLE v_ref_usuario OWNER TO postgres;
+
+--
+-- TOC entry 2636 (class 0 OID 63380)
+-- Dependencies: 181
+-- Data for Name: ajustes; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ajustes (id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (1, 1, 1, 1, 1, '2022-12-08 00:00:00', 1, 'AJUSTADO');
+INSERT INTO ajustes (id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (2, 1, 1, 1, 8, '2022-12-08 00:00:00', 1, 'AJUSTADO');
+INSERT INTO ajustes (id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (3, 1, 1, 1, 8, '2022-12-08 00:00:00', 1, 'AJUSTADO');
+INSERT INTO ajustes (id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (4, 1, 1, 1, 8, '2022-12-08 00:00:00', 1, 'AJUSTADO');
+INSERT INTO ajustes (id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (5, 1, 1, 1, 8, '2022-12-08 00:00:00', 2, 'AJUSTADO');
+INSERT INTO ajustes (id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (6, 1, 2, 1, 1, '2022-12-14 00:00:00', 5, 'AJUSTADO');
+INSERT INTO ajustes (id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (7, 1, 1, 1, 2, '2022-12-15 00:00:00', 10, 'AJUSTADO');
+INSERT INTO ajustes (id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (8, 1, 1, 1, 1, '2022-12-16 00:00:00', 600, 'AJUSTADO');
+INSERT INTO ajustes (id_ajuste, id_depo, id_majuste, usu_cod, pro_cod, aj_fecha, cantidad, estado) VALUES (9, 1, 2, 1, 7, '2022-12-16 00:00:00', 10, 'AJUSTADO');
+
+
+--
+-- TOC entry 2637 (class 0 OID 63383)
+-- Dependencies: 182
+-- Data for Name: compras; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO compras (id_compra, usu_cod, prv_cod, id_sucursal, com_fecha, com_nro_factura, com_ntimbrado, com_can_cuota, com_totaliva, com_total, com_estado, com_condicion, com_intervalo, com_gravadas, tim_vencimiento, nro_orden) VALUES (1, 1, 1, 1, '2022-12-20', '888-555-5555555', 55645645, 1, 35281, 649999, 'CONFIRMADO', 'CONTADO', 15, 0, '2022-12-20 00:00:00', 1);
+
+
+--
+-- TOC entry 2638 (class 0 OID 63389)
+-- Dependencies: 183
+-- Data for Name: compras_detalle; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO compras_detalle (id_compra, pro_cod, id_depo, cantidad, precio_unit, subtotal, iva5, iva10, exentas, estado) VALUES (1, 3, 1, 1, 499999, 499999, 0, 23810, 0, NULL);
+INSERT INTO compras_detalle (id_compra, pro_cod, id_depo, cantidad, precio_unit, subtotal, iva5, iva10, exentas, estado) VALUES (1, 1, 1, 1, 50000, 50000, 0, 2380, 0, NULL);
+INSERT INTO compras_detalle (id_compra, pro_cod, id_depo, cantidad, precio_unit, subtotal, iva5, iva10, exentas, estado) VALUES (1, 2, 1, 1, 100000, 100000, 0, 9091, 0, 'ACTIVO');
+
+
+--
+-- TOC entry 2639 (class 0 OID 63395)
+-- Dependencies: 184
+-- Data for Name: compras_pedidos; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO compras_pedidos (id_pedido, usu_cod, fechac, descri, estado) VALUES (0, 1, '2022-11-22', 'CONFIGURACION', 'EN USO');
+INSERT INTO compras_pedidos (id_pedido, usu_cod, fechac, descri, estado) VALUES (1, 1, '2022-12-20', 'PRUEBA', 'EN USO');
+
+
+--
+-- TOC entry 2640 (class 0 OID 63401)
+-- Dependencies: 185
+-- Data for Name: compras_pedidos_detalle; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO compras_pedidos_detalle (id_pedido, pro_cod, id_depo, cantidad, precio_unit, subtotal, iva5, iva10, exentas) VALUES (1, 3, 1, 1, 500000, 500000, 0, 23810, 0);
+
+
+--
+-- TOC entry 2641 (class 0 OID 63407)
+-- Dependencies: 186
+-- Data for Name: ctas_pagar; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ctas_pagar (id_cuenta, id_compra, cta_vto, cta_importe, cta_estado, cta_cuo_nro, saldo) VALUES (1, 1, '2023-01-19', 649999, 'ACTIVO', 1, 649999);
+
+
+--
+-- TOC entry 2642 (class 0 OID 63410)
+-- Dependencies: 187
+-- Data for Name: detalle_credito; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO detalle_credito (cod_notc, pro_cod, id_depo, cantidad, precio, subtotal, exentas, iva5, iva10) VALUES (1, 1, 1, 1, 50000, 50000, 0, 0, 2381);
+
+
+--
+-- TOC entry 2643 (class 0 OID 63416)
+-- Dependencies: 188
+-- Data for Name: detalle_debito; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO detalle_debito (id_debito, id_moti, id_depo, pro_cod, iva5, iva10, exentas, precio, subtotal, cantidad) VALUES (1, 2, 1, 1, 0, 2381, 0, 50000, 50000, 1);
+
+
+--
+-- TOC entry 2644 (class 0 OID 63422)
+-- Dependencies: 189
+-- Data for Name: detalle_orden; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO detalle_orden (nro_orden, id_depo, pro_cod, iva5, exentas, precioc, iva10, subtotal, cantidad, estado) VALUES (1, 1, 3, 0, 0, 499999, 23810, 499999, 1, 'ACTIVO');
+INSERT INTO detalle_orden (nro_orden, id_depo, pro_cod, iva5, exentas, precioc, iva10, subtotal, cantidad, estado) VALUES (1, 1, 1, 0, 0, 50000, 2380, 50000, 1, 'ACTIVO');
+
+
+--
+-- TOC entry 2645 (class 0 OID 63428)
+-- Dependencies: 190
+-- Data for Name: detalle_presupuesto; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO detalle_presupuesto (id_presu, pro_cod, id_depo, cantidad, precio_unit, subtotal, iva5, iva10, exentas) VALUES (1, 3, 1, 1, 499999, 499999, 0, 23810, 0);
+
+
+--
+-- TOC entry 2646 (class 0 OID 63434)
+-- Dependencies: 191
+-- Data for Name: libro_de_compra; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO libro_de_compra (id_libro, id_compra, nro_factura, prv_cod, iva5, iva10, exentas, total, estado) VALUES (1, 1, '888-555-5555555', 1, 0, 23810, 0, 649999, 'ACTIVO');
+
+
+--
+-- TOC entry 2647 (class 0 OID 63440)
+-- Dependencies: 192
+-- Data for Name: motivo_ajuste; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO motivo_ajuste (id_majuste, maj_descri) VALUES (1, 'ROBO');
+INSERT INTO motivo_ajuste (id_majuste, maj_descri) VALUES (2, 'MERMA');
+INSERT INTO motivo_ajuste (id_majuste, maj_descri) VALUES (3, 'INVENTARIO');
+
+
+--
+-- TOC entry 2648 (class 0 OID 63443)
+-- Dependencies: 193
+-- Data for Name: motivo_nota; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO motivo_nota (id_moti, descripcion) VALUES (1, 'DELIVERY');
+INSERT INTO motivo_nota (id_moti, descripcion) VALUES (2, 'CARGOS A LA CUENTA');
+INSERT INTO motivo_nota (id_moti, descripcion) VALUES (4, 'AVERIADO');
+INSERT INTO motivo_nota (id_moti, descripcion) VALUES (3, 'CADUCADO');
+INSERT INTO motivo_nota (id_moti, descripcion) VALUES (5, 'PIEZA INCOMPLETA');
+
+
+--
+-- TOC entry 2649 (class 0 OID 63446)
+-- Dependencies: 194
+-- Data for Name: nota_de_credito; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO nota_de_credito (cod_notc, id_compra, id_moti, usu_cod, prv_cod, btc_fecha_sistema, btc_monto, btc_fecha_recibido, btc_totiva, btc_nro_fact, btc_timbrado, btc_timbrado_venc, estado) VALUES (1, 1, 3, 1, 1, '2022-12-20 00:00:00', 100000, '2022-12-20 00:00:00', 2381, '888-555-5555555', 55645645, '2022-12-20 00:00:00', 'CONFIRMADO');
+
+
+--
+-- TOC entry 2650 (class 0 OID 63452)
+-- Dependencies: 195
+-- Data for Name: nota_debito; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO nota_debito (id_debito, id_compra, usu_cod, prv_cod, estado, fecha_sistema, fecha_recibido, monto, total_iva, timbrado, tim_vencimiento, nro_fact) VALUES (1, 1, 1, 1, 'CONFIRMADO', '2022-12-20 00:00:00', '2022-12-20 00:00:00', 100000, 2381, 55645645, '2022-12-20 00:00:00', '888-555-5555555');
+
+
+--
+-- TOC entry 2651 (class 0 OID 63458)
+-- Dependencies: 196
+-- Data for Name: nota_remision; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+
+
+--
+-- TOC entry 2652 (class 0 OID 63464)
+-- Dependencies: 197
+-- Data for Name: orden_de_compra; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO orden_de_compra (nro_orden, prv_cod, id_presu, fecha, iva_total, totalo, estado, usu_cod) VALUES (0, 1, 0, '2022-12-06', 0, 0, 'EN USO', 1);
+INSERT INTO orden_de_compra (nro_orden, prv_cod, id_presu, fecha, iva_total, totalo, estado, usu_cod) VALUES (1, 1, 1, '2022-12-20', 0, 549999, 'EN USO', 1);
+
+
+--
+-- TOC entry 2653 (class 0 OID 63467)
+-- Dependencies: 198
+-- Data for Name: presupuesto; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO presupuesto (id_presu, prv_cod, id_pedido, usu_cod, total, estado, validez, fecha) VALUES (0, 1, 0, 1, 0, 'ACTIVO', '2002-12-22', '2022-11-30');
+INSERT INTO presupuesto (id_presu, prv_cod, id_pedido, usu_cod, total, estado, validez, fecha) VALUES (1, 1, 1, 1, 499999, 'EN USO', '2022-12-22', '2022-12-20');
+
+
+--
+-- TOC entry 2654 (class 0 OID 63473)
+-- Dependencies: 199
+-- Data for Name: ref_cargos; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_cargos (id_cargo, car_descri) VALUES (1, 'ADMINISTRADOR');
+INSERT INTO ref_cargos (id_cargo, car_descri) VALUES (2, 'EMPLEADO');
+
+
+--
+-- TOC entry 2655 (class 0 OID 63476)
+-- Dependencies: 200
+-- Data for Name: ref_ciudad; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_ciudad (id_ciudad, id_pais, ciu_descri) VALUES (1, 1, 'ASUNCION');
+INSERT INTO ref_ciudad (id_ciudad, id_pais, ciu_descri) VALUES (2, 2, 'BUENOS AIRES');
+INSERT INTO ref_ciudad (id_ciudad, id_pais, ciu_descri) VALUES (3, 5, 'PERUANO');
+
+
+--
+-- TOC entry 2656 (class 0 OID 63479)
+-- Dependencies: 201
+-- Data for Name: ref_cliente; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_cliente (id_cliente, id_persona, cli_ci, nombres, estado) VALUES (1, 1, '41454', 'Lucas Vietsky', 'ACTIVO');
+
+
+--
+-- TOC entry 2657 (class 0 OID 63485)
+-- Dependencies: 202
+-- Data for Name: ref_deposito; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_deposito (id_depo, id_sucursal, dep_descri) VALUES (1, 1, 'DEPOSITO');
+INSERT INTO ref_deposito (id_depo, id_sucursal, dep_descri) VALUES (2, 2, 'DEPOSITO BUENOS');
+INSERT INTO ref_deposito (id_depo, id_sucursal, dep_descri) VALUES (0, 2, NULL);
+
+
+--
+-- TOC entry 2658 (class 0 OID 63488)
+-- Dependencies: 203
+-- Data for Name: ref_empleado; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_empleado (id_empleado, id_persona, id_cargo, id_sucursal, estado) VALUES (1, 1, 1, 1, 'ACTIVO');
+INSERT INTO ref_empleado (id_empleado, id_persona, id_cargo, id_sucursal, estado) VALUES (3, 3, 2, 1, 'ACTIVO');
+INSERT INTO ref_empleado (id_empleado, id_persona, id_cargo, id_sucursal, estado) VALUES (2, 2, 2, 1, 'ACTIVO');
+
+
+--
+-- TOC entry 2659 (class 0 OID 63494)
+-- Dependencies: 204
+-- Data for Name: ref_grupos; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_grupos (gru_cod, gru_nombre) VALUES (1, 'ADMINISTRADOR');
+INSERT INTO ref_grupos (gru_cod, gru_nombre) VALUES (2, 'EMPLEADO');
+
+
+--
+-- TOC entry 2660 (class 0 OID 63497)
+-- Dependencies: 205
+-- Data for Name: ref_marca; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_marca (mar_cod, mar_descri) VALUES (2, 'UNITRUCK GERMANY');
+INSERT INTO ref_marca (mar_cod, mar_descri) VALUES (1, 'GULF');
+INSERT INTO ref_marca (mar_cod, mar_descri) VALUES (3, 'MAHLE');
+INSERT INTO ref_marca (mar_cod, mar_descri) VALUES (4, 'CISER');
+INSERT INTO ref_marca (mar_cod, mar_descri) VALUES (5, 'STEEL PRO ');
+
+
+--
+-- TOC entry 2661 (class 0 OID 63500)
+-- Dependencies: 206
+-- Data for Name: ref_modulos; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_modulos (mod_cod, mod_nombre) VALUES (1, 'REFERENCIALES');
+INSERT INTO ref_modulos (mod_cod, mod_nombre) VALUES (2, 'COMPRAS');
+INSERT INTO ref_modulos (mod_cod, mod_nombre) VALUES (4, 'CONFIGURACIONES');
+INSERT INTO ref_modulos (mod_cod, mod_nombre) VALUES (5, 'INFORMES');
+
+
+--
+-- TOC entry 2662 (class 0 OID 63503)
+-- Dependencies: 207
+-- Data for Name: ref_paginas; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (1, '/T.A/referenciales/pais/pais_index.php', 'PAIS', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (2, '/T.A/referenciales/unidadmedida/unidadmedida_index.php', 'UNIDAD DE MEDIDA', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (3, '/T.A/referenciales/marcas/marca_index.php', 'MARCAS', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (4, '/T.A/referenciales/tipodeproductos/tipo_index.php', 'TIPO DE PRODUCTO', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (5, '/T.A/referenciales/cargos/cargos_index.php', 'CARGOS', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (6, '/T.A/referenciales/grupos/grupos_index.php', 'GRUPOS', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (7, '/T.A/referenciales/tipodeimpuesto/tipo_de_impuesto_index.php', 'TIPO DE IMPUESTO', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (8, '/T.A/referenciales/productos/productos_index.php', 'PRODUCTOS', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (9, '/T.A/referenciales/tipopersona/tipopersona_index.php', 'TIPO PERSONA', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (10, '/T.A/referenciales/ciudad/ciudad_index.php', 'CIUDAD', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (11, '/T.A/referenciales/persona/persona_index.php', 'PERSONA', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (12, '/T.A/referenciales/empleado/empleado_index.php', 'EMPLEADO', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (13, '/T.A/referenciales/proveedor/proveedor_index.php', 'PROVEEDOR', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (14, '/T.A/referenciales/cliente/cliente_index.php', 'CLIENTES', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (15, '/T.A/referenciales/deposito/deposito_index.php', 'DEPOSITO', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (16, '/T.A/referenciales/sucursal/sucursal_index.php', 'SUCURSAL', 1);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (18, '/T.A/compras/pedido/pedidosc_index.php', 'PEDIDOS', 2);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (20, '/T.A/compras/compras/compras_index.php', 'COMPRAS', 2);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (21, '/T.A/configuraciones/Pagina/pagina_index.php', 'PAGINAS', 4);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (22, '/T.A/configuraciones/Usuario/usuario_index.php', 'USUARIOS', 4);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (23, '/T.A/compras/orden_compra/ordenc_index.php', 'ORDEN DE COMPRA', 2);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (24, '/T.A/compras/presupuesto/presupuesto_index.php', 'PRESUPUESTO', 2);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (25, ' /T.A/informes/referenciales/rept_referenciales.php ', 'REFERENCIALES', 5);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (26, ' /T.A/informes/compras/rept_compras.php ', 'COMPRAS', 5);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (17, '/T.A/configuraciones/Stock/stock_index.php', 'STOCK', 4);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (27, '/T.A/configuraciones/ajuste/ajuste_index.php', 'AJUSTE', 4);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (28, '/T.A/compras/cuentas/cuentas_index.php', 'CUENTAS', 2);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (29, '/T.A/compras/nota_debito/nota_debito_index.php', 'NOTA DEBITO', 2);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (30, '/T.A/compras/nota_credito/nota_credito_index.php', 'NOTA CREDITO', 2);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (31, '/T.A/compras/nota_remision/nota_remision_index.php', 'NOTA REMISION', 2);
+INSERT INTO ref_paginas (pag_cod, pag_direc, pag_nombre, mod_cod) VALUES (32, '/T.A/referenciales/vehiculos/vehiculo_index.php', 'VEHICULOS', 1);
+
+
+--
+-- TOC entry 2663 (class 0 OID 63506)
+-- Dependencies: 208
+-- Data for Name: ref_pais; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_pais (id_pais, pai_descri) VALUES (1, 'PARAGUAY');
+INSERT INTO ref_pais (id_pais, pai_descri) VALUES (2, 'ARGENTINA');
+INSERT INTO ref_pais (id_pais, pai_descri) VALUES (3, 'ECUADOR');
+INSERT INTO ref_pais (id_pais, pai_descri) VALUES (4, 'BOLIVIA');
+INSERT INTO ref_pais (id_pais, pai_descri) VALUES (5, 'PERU');
+
+
+--
+-- TOC entry 2664 (class 0 OID 63509)
+-- Dependencies: 209
+-- Data for Name: ref_permisos; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (1, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (2, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (3, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (4, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (5, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (6, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (7, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (8, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (9, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (10, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (11, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (12, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (15, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (16, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (17, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (18, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (20, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (21, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (22, 1, true, true, true, true, NULL);
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (1, 2, true, false, false, false, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (2, 2, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (3, 2, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (23, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (4, 2, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (13, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (5, 2, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (24, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (25, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (26, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (27, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (28, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (29, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (30, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (31, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (32, 1, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (31, 2, false, false, false, false, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (20, 2, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (26, 2, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (8, 2, true, true, true, true, 'ADMIN');
+INSERT INTO ref_permisos (pag_cod, gru_cod, leer, insertar, editar, borrar, auditoria) VALUES (6, 2, true, true, true, true, 'ADMIN');
+
+
+--
+-- TOC entry 2665 (class 0 OID 63515)
+-- Dependencies: 210
+-- Data for Name: ref_persona; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_persona (id_persona, id_ciudad, tipo_per_cod, per_nombre, per_apellido, per_nro_doc, per_ruc, per_direccion, per_telefono, per_email, per_sexo, per_fecha_nacimiento, razon_social, per_estado, per_imagen) VALUES (1, 1, 1, 'Lucas', 'Vietsky', '1311', '1313', 'ada', '131', 'pepito77.com', 'M', '2002-09-10', 'LUCAS', 'activo', 'persona1.jpeg');
+INSERT INTO ref_persona (id_persona, id_ciudad, tipo_per_cod, per_nombre, per_apellido, per_nro_doc, per_ruc, per_direccion, per_telefono, per_email, per_sexo, per_fecha_nacimiento, razon_social, per_estado, per_imagen) VALUES (2, 1, 1, 'ALFREDO', 'TORPEDO', '131313', '13131', 'AVD_PENISILVANIAS14', '131313', 'Torpedoz@gmail.com', 'VACIO', '2002-02-03', 'CLIENTE', 'ACTIVO', 'hacker.jpeg');
+INSERT INTO ref_persona (id_persona, id_ciudad, tipo_per_cod, per_nombre, per_apellido, per_nro_doc, per_ruc, per_direccion, per_telefono, per_email, per_sexo, per_fecha_nacimiento, razon_social, per_estado, per_imagen) VALUES (3, 2, 1, 'ANALIA', 'GOMEZ', '781454', '19313', 'AVDA SIEMPRE VIVA', '09855415', 'analia@gmail.com', 'Femenino', '2002-10-09', 'CLIENTE OCASIONAL', 'ACTIVO', 'ventas.png');
+
+
+--
+-- TOC entry 2666 (class 0 OID 63521)
+-- Dependencies: 211
+-- Data for Name: ref_producto; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_producto (pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen) VALUES (1, 2, 1, 2, 1, 'RULEMANES', 50000, 50000, 'ACTIVO', 123111, 'ruleman.jpg');
+INSERT INTO ref_producto (pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen) VALUES (4, 1, 2, 2, 2, 'CATRACAS', 1000000, 1000000, 'ACTIVO', 3131, 'catraca.jpg');
+INSERT INTO ref_producto (pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen) VALUES (2, 1, 4, 2, 2, 'TUERCA', 100000, 100000, 'ACTIVO', 14124, 'tuerca.jpg');
+INSERT INTO ref_producto (pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen) VALUES (3, 1, 1, 2, 1, 'ACEITES', 500000, 500000, 'ACTIVO', 789456, 'aceite.jpg');
+INSERT INTO ref_producto (pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen) VALUES (5, 2, 4, 2, 3, 'FILTRO', 1000000, 5000000, 'ACTIVO', 7415, 'FILTROS.jpg');
+INSERT INTO ref_producto (pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen) VALUES (6, 3, 2, 2, 3, 'LLAVE', 15000, 150000, 'ACTIVO', 71154, 'LLAVE.jpg');
+INSERT INTO ref_producto (pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen) VALUES (7, 3, 2, 2, 2, 'SET DE HERRAMIENTAS', 5000000, 1000000, 'ACTIVO', 12445, 'SET.jpg');
+INSERT INTO ref_producto (pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen) VALUES (8, 2, 2, 2, 3, 'NEUMATICO', 10000000, 10000000, 'ACTIVO', 66331, 'neumatico.jpg');
+INSERT INTO ref_producto (pro_cod, id_tipro, mar_cod, id_timp, id_um, pro_descri, precio_costo, precio_venta, pro_estado, codigo_barra, pro_imagen) VALUES (0, 2, 2, 2, 3, 'NEUMATICO', 10000000, 10000000, 'ACTIVO', 66331, NULL);
+
+
+--
+-- TOC entry 2667 (class 0 OID 63524)
+-- Dependencies: 212
+-- Data for Name: ref_proveedor; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_proveedor (prv_cod, id_ciudad, prv_razon_social, prv_ruc, prv_direccion, prv_tel, prv_estado) VALUES (1, 1, 'GOLF', '14543', 'AVDA MARISCAL LOPEZ', '13145421', 'ACTIVO');
+INSERT INTO ref_proveedor (prv_cod, id_ciudad, prv_razon_social, prv_ruc, prv_direccion, prv_tel, prv_estado) VALUES (2, 1, 'DUFF', '54131', 'AVDA SIEMPRE VIVA', '095845451', 'ACTIVO');
+INSERT INTO ref_proveedor (prv_cod, id_ciudad, prv_razon_social, prv_ruc, prv_direccion, prv_tel, prv_estado) VALUES (3, 3, 'PERSONA X', '715154', 'AVDA SIEMPRE FELIZ', '014541554', 'ACTIVO');
+
+
+--
+-- TOC entry 2668 (class 0 OID 63527)
+-- Dependencies: 213
+-- Data for Name: ref_stock; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_stock (pro_cod, id_depo, st_cantidad) VALUES (1, 2, 100);
+INSERT INTO ref_stock (pro_cod, id_depo, st_cantidad) VALUES (4, 2, 50);
+INSERT INTO ref_stock (pro_cod, id_depo, st_cantidad) VALUES (5, 1, 100);
+INSERT INTO ref_stock (pro_cod, id_depo, st_cantidad) VALUES (3, 1, 51);
+INSERT INTO ref_stock (pro_cod, id_depo, st_cantidad) VALUES (2, 1, 51);
+INSERT INTO ref_stock (pro_cod, id_depo, st_cantidad) VALUES (1, 1, 100);
+
+
+--
+-- TOC entry 2669 (class 0 OID 63533)
+-- Dependencies: 214
+-- Data for Name: ref_sucursal; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_sucursal (id_sucursal, id_ciudad, suc_descri, suc_telefono, suc_direccion) VALUES (1, 1, 'CENTRAL', '15454', 'AVD_PENISILVANIAS');
+INSERT INTO ref_sucursal (id_sucursal, id_ciudad, suc_descri, suc_telefono, suc_direccion) VALUES (2, 2, 'SUCURSAL BUENOS DIAS', '098545154', 'BUENOS AIRES');
+
+
+--
+-- TOC entry 2670 (class 0 OID 63536)
+-- Dependencies: 215
+-- Data for Name: ref_tipo_impuesto; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_tipo_impuesto (id_timp, descripcion, porcentaje) VALUES (1, 'IVA 5%', 20);
+INSERT INTO ref_tipo_impuesto (id_timp, descripcion, porcentaje) VALUES (2, 'IVA 10%', 11);
+INSERT INTO ref_tipo_impuesto (id_timp, descripcion, porcentaje) VALUES (3, 'EXENTAS', 0);
+
+
+--
+-- TOC entry 2671 (class 0 OID 63539)
+-- Dependencies: 216
+-- Data for Name: ref_tipo_persona; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_tipo_persona (id_tipper, tp_descri) VALUES (1, 'JURIDICA');
+INSERT INTO ref_tipo_persona (id_tipper, tp_descri) VALUES (2, 'FISICA');
+
+
+--
+-- TOC entry 2672 (class 0 OID 63542)
+-- Dependencies: 217
+-- Data for Name: ref_tipo_producto; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_tipo_producto (id_tipro, tipro_descri) VALUES (1, 'ACEITE');
+INSERT INTO ref_tipo_producto (id_tipro, tipro_descri) VALUES (2, 'REPUESTO');
+INSERT INTO ref_tipo_producto (id_tipro, tipro_descri) VALUES (3, 'HERRAMIENTA');
+
+
+--
+-- TOC entry 2673 (class 0 OID 63545)
+-- Dependencies: 218
+-- Data for Name: ref_unidadmedida; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_unidadmedida (id_um, descripcion) VALUES (1, 'LITROS');
+INSERT INTO ref_unidadmedida (id_um, descripcion) VALUES (2, 'KG');
+INSERT INTO ref_unidadmedida (id_um, descripcion) VALUES (3, 'GR');
+
+
+--
+-- TOC entry 2674 (class 0 OID 63548)
+-- Dependencies: 219
+-- Data for Name: ref_usuario; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_usuario (usu_cod, usu_nick, usu_clave, usu_estado, id_sucursal, id_empleado, gru_cod, usu_foto, intentos, fecha_intento, auditoria) VALUES (1, 'ADMIN', '202cb962ac59075b964b07152d234b70', 'ACTIVO', 1, 1, 1, 'User_Line.png', NULL, NULL, NULL);
+INSERT INTO ref_usuario (usu_cod, usu_nick, usu_clave, usu_estado, id_sucursal, id_empleado, gru_cod, usu_foto, intentos, fecha_intento, auditoria) VALUES (2, 'ALFREDO', '202cb962ac59075b964b07152d234b70', 'ACTIVO', 2, 2, 2, 'pensando.png', NULL, NULL, NULL);
+
+
+--
+-- TOC entry 2675 (class 0 OID 63554)
+-- Dependencies: 220
+-- Data for Name: ref_vehiculo; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO ref_vehiculo (id_vehiculo, chapa, chasis, modelo, color, marca) VALUES (1, 'AWL458', 'XLA123', 'AXL', 'ROJO', 'BMW');
+INSERT INTO ref_vehiculo (id_vehiculo, chapa, chasis, modelo, color, marca) VALUES (2, 'ALL234', 'ADAWD', 'AXL', 'VERDE', 'BMW');
+INSERT INTO ref_vehiculo (id_vehiculo, chapa, chasis, modelo, color, marca) VALUES (3, 'AMNLX', 'A2ERD', 'AXL', 'AZUL', 'BMW');
+
+
+--
+-- TOC entry 2676 (class 0 OID 63560)
+-- Dependencies: 221
+-- Data for Name: remision_ndetalle; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+
+
+--
+-- TOC entry 2329 (class 2606 OID 63709)
+-- Name: ajustes_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ajustes
+    ADD CONSTRAINT ajustes_pk PRIMARY KEY (id_ajuste);
+
+
+--
+-- TOC entry 2365 (class 2606 OID 63711)
+-- Name: cargo_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_cargos
+    ADD CONSTRAINT cargo_pk PRIMARY KEY (id_cargo);
+
+
+--
+-- TOC entry 2367 (class 2606 OID 63713)
+-- Name: ciudad_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_ciudad
+    ADD CONSTRAINT ciudad_pk PRIMARY KEY (id_ciudad);
+
+
+--
+-- TOC entry 2369 (class 2606 OID 63715)
+-- Name: cli_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_cliente
+    ADD CONSTRAINT cli_pk PRIMARY KEY (id_cliente);
+
+
+--
+-- TOC entry 2339 (class 2606 OID 63717)
+-- Name: ctas_pagar_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ctas_pagar
+    ADD CONSTRAINT ctas_pagar_pk PRIMARY KEY (id_cuenta, id_compra);
+
+
+--
+-- TOC entry 2371 (class 2606 OID 63719)
+-- Name: dep_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_deposito
+    ADD CONSTRAINT dep_pk PRIMARY KEY (id_depo);
+
+
+--
+-- TOC entry 2341 (class 2606 OID 63721)
+-- Name: detalle_credito_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_credito
+    ADD CONSTRAINT detalle_credito_pk PRIMARY KEY (cod_notc, pro_cod, id_depo);
+
+
+--
+-- TOC entry 2343 (class 2606 OID 63723)
+-- Name: detalle_debito_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_debito
+    ADD CONSTRAINT detalle_debito_pk PRIMARY KEY (id_moti, id_debito, id_depo, pro_cod);
+
+
+--
+-- TOC entry 2345 (class 2606 OID 63725)
+-- Name: detalle_orden_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_orden
+    ADD CONSTRAINT detalle_orden_pk PRIMARY KEY (nro_orden, id_depo, pro_cod);
+
+
+--
+-- TOC entry 2347 (class 2606 OID 63727)
+-- Name: detalle_presupuesto_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_presupuesto
+    ADD CONSTRAINT detalle_presupuesto_pk PRIMARY KEY (id_presu, pro_cod, id_depo);
+
+
+--
+-- TOC entry 2373 (class 2606 OID 63729)
+-- Name: empleado_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_empleado
+    ADD CONSTRAINT empleado_pk PRIMARY KEY (id_empleado);
+
+
+--
+-- TOC entry 2331 (class 2606 OID 63731)
+-- Name: fact_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras
+    ADD CONSTRAINT fact_pk PRIMARY KEY (id_compra);
+
+
+--
+-- TOC entry 2333 (class 2606 OID 63733)
+-- Name: factd_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras_detalle
+    ADD CONSTRAINT factd_pk PRIMARY KEY (id_compra, pro_cod, id_depo);
+
+
+--
+-- TOC entry 2375 (class 2606 OID 63735)
+-- Name: grupos_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_grupos
+    ADD CONSTRAINT grupos_pk PRIMARY KEY (gru_cod);
+
+
+--
+-- TOC entry 2349 (class 2606 OID 63737)
+-- Name: libro_de_compra_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY libro_de_compra
+    ADD CONSTRAINT libro_de_compra_pk PRIMARY KEY (id_libro, id_compra);
+
+
+--
+-- TOC entry 2377 (class 2606 OID 63739)
+-- Name: marca_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_marca
+    ADD CONSTRAINT marca_pk PRIMARY KEY (mar_cod);
+
+
+--
+-- TOC entry 2379 (class 2606 OID 63741)
+-- Name: modulos_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_modulos
+    ADD CONSTRAINT modulos_pk PRIMARY KEY (mod_cod);
+
+
+--
+-- TOC entry 2351 (class 2606 OID 63743)
+-- Name: motivo_ajuste_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY motivo_ajuste
+    ADD CONSTRAINT motivo_ajuste_pk PRIMARY KEY (id_majuste);
+
+
+--
+-- TOC entry 2353 (class 2606 OID 63745)
+-- Name: motivo_nota_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY motivo_nota
+    ADD CONSTRAINT motivo_nota_pk PRIMARY KEY (id_moti);
+
+
+--
+-- TOC entry 2355 (class 2606 OID 63747)
+-- Name: nota_de_credito_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_de_credito
+    ADD CONSTRAINT nota_de_credito_pk PRIMARY KEY (cod_notc);
+
+
+--
+-- TOC entry 2357 (class 2606 OID 63749)
+-- Name: nota_debito_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_debito
+    ADD CONSTRAINT nota_debito_pk PRIMARY KEY (id_debito);
+
+
+--
+-- TOC entry 2359 (class 2606 OID 63751)
+-- Name: nota_remision_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_remision
+    ADD CONSTRAINT nota_remision_pk PRIMARY KEY (id_remision);
+
+
+--
+-- TOC entry 2361 (class 2606 OID 63753)
+-- Name: orden_de_compra_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY orden_de_compra
+    ADD CONSTRAINT orden_de_compra_pk PRIMARY KEY (nro_orden);
+
+
+--
+-- TOC entry 2381 (class 2606 OID 63755)
+-- Name: paginas_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_paginas
+    ADD CONSTRAINT paginas_pk PRIMARY KEY (pag_cod);
+
+
+--
+-- TOC entry 2383 (class 2606 OID 63757)
+-- Name: pais_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_pais
+    ADD CONSTRAINT pais_pk PRIMARY KEY (id_pais);
+
+
+--
+-- TOC entry 2393 (class 2606 OID 63759)
+-- Name: pd_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_stock
+    ADD CONSTRAINT pd_pk PRIMARY KEY (pro_cod, id_depo);
+
+
+--
+-- TOC entry 2335 (class 2606 OID 63761)
+-- Name: pedc_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras_pedidos
+    ADD CONSTRAINT pedc_pk PRIMARY KEY (id_pedido);
+
+
+--
+-- TOC entry 2337 (class 2606 OID 63763)
+-- Name: pedcdid; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras_pedidos_detalle
+    ADD CONSTRAINT pedcdid PRIMARY KEY (id_pedido, pro_cod, id_depo);
+
+
+--
+-- TOC entry 2385 (class 2606 OID 63765)
+-- Name: permisos_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_permisos
+    ADD CONSTRAINT permisos_pk PRIMARY KEY (pag_cod, gru_cod);
+
+
+--
+-- TOC entry 2387 (class 2606 OID 63767)
+-- Name: persona_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_persona
+    ADD CONSTRAINT persona_pk PRIMARY KEY (id_persona);
+
+
+--
+-- TOC entry 2363 (class 2606 OID 63769)
+-- Name: presupuesto_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY presupuesto
+    ADD CONSTRAINT presupuesto_pk PRIMARY KEY (id_presu);
+
+
+--
+-- TOC entry 2389 (class 2606 OID 63771)
+-- Name: productos_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_producto
+    ADD CONSTRAINT productos_pk PRIMARY KEY (pro_cod);
+
+
+--
+-- TOC entry 2391 (class 2606 OID 63773)
+-- Name: prv_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_proveedor
+    ADD CONSTRAINT prv_pk PRIMARY KEY (prv_cod);
+
+
+--
+-- TOC entry 2410 (class 2606 OID 63775)
+-- Name: remision_ndetalle_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY remision_ndetalle
+    ADD CONSTRAINT remision_ndetalle_pk PRIMARY KEY (id_remision, pro_cod, id_depo);
+
+
+--
+-- TOC entry 2395 (class 2606 OID 63777)
+-- Name: sucursal_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_sucursal
+    ADD CONSTRAINT sucursal_pk PRIMARY KEY (id_sucursal);
+
+
+--
+-- TOC entry 2401 (class 2606 OID 63779)
+-- Name: tip_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_tipo_producto
+    ADD CONSTRAINT tip_pk PRIMARY KEY (id_tipro);
+
+
+--
+-- TOC entry 2397 (class 2606 OID 63781)
+-- Name: tipo_imp_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_tipo_impuesto
+    ADD CONSTRAINT tipo_imp_pk PRIMARY KEY (id_timp);
+
+
+--
+-- TOC entry 2399 (class 2606 OID 63783)
+-- Name: tipo_persona_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_tipo_persona
+    ADD CONSTRAINT tipo_persona_pk PRIMARY KEY (id_tipper);
+
+
+--
+-- TOC entry 2403 (class 2606 OID 63785)
+-- Name: um_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_unidadmedida
+    ADD CONSTRAINT um_pk PRIMARY KEY (id_um);
+
+
+--
+-- TOC entry 2406 (class 2606 OID 63787)
+-- Name: usu_cod; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_usuario
+    ADD CONSTRAINT usu_cod PRIMARY KEY (usu_cod);
+
+
+--
+-- TOC entry 2408 (class 2606 OID 63789)
+-- Name: vehiculo_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_vehiculo
+    ADD CONSTRAINT vehiculo_pk PRIMARY KEY (id_vehiculo);
+
+
+--
+-- TOC entry 2404 (class 1259 OID 63790)
+-- Name: fki_grupo_fk; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX fki_grupo_fk ON ref_usuario USING btree (gru_cod);
+
+
+--
+-- TOC entry 2491 (class 2620 OID 63791)
+-- Name: remi_stock; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER remi_stock AFTER UPDATE ON nota_remision FOR EACH ROW EXECUTE PROCEDURE remision_stock();
+
+
+--
+-- TOC entry 2478 (class 2620 OID 63792)
+-- Name: trg_ajustes_stock; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_ajustes_stock AFTER INSERT ON ajustes FOR EACH ROW EXECUTE PROCEDURE ajustes_stock();
+
+
+--
+-- TOC entry 2481 (class 2620 OID 63793)
+-- Name: trg_compra_iva; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_compra_iva AFTER INSERT OR DELETE ON compras_detalle FOR EACH ROW EXECUTE PROCEDURE compras_iva();
+
+
+--
+-- TOC entry 2482 (class 2620 OID 63794)
+-- Name: trg_compra_total; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_compra_total AFTER INSERT OR DELETE ON compras_detalle FOR EACH ROW EXECUTE PROCEDURE compras_total();
+
+
+--
+-- TOC entry 2479 (class 2620 OID 63795)
+-- Name: trg_cuentas; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_cuentas AFTER INSERT OR DELETE OR UPDATE ON compras FOR EACH ROW EXECUTE PROCEDURE compras_c_ctaspagar();
+
+
+--
+-- TOC entry 2486 (class 2620 OID 63796)
+-- Name: trg_debito_total; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_debito_total AFTER INSERT OR DELETE ON detalle_debito FOR EACH ROW EXECUTE PROCEDURE nota_debito_total();
+
+
+--
+-- TOC entry 2483 (class 2620 OID 63797)
+-- Name: trg_nota_credito_iva; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_nota_credito_iva AFTER INSERT OR DELETE ON detalle_credito FOR EACH ROW EXECUTE PROCEDURE nota_credito_iva();
+
+
+--
+-- TOC entry 2484 (class 2620 OID 63798)
+-- Name: trg_nota_credito_total; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_nota_credito_total AFTER INSERT OR DELETE ON detalle_credito FOR EACH ROW EXECUTE PROCEDURE nota_credito_total();
+
+
+--
+-- TOC entry 2485 (class 2620 OID 63799)
+-- Name: trg_nota_creditototal; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_nota_creditototal AFTER INSERT OR DELETE OR UPDATE ON detalle_credito FOR EACH ROW EXECUTE PROCEDURE nota_credito_total();
+
+
+--
+-- TOC entry 2487 (class 2620 OID 63800)
+-- Name: trg_nota_debito_iva; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_nota_debito_iva AFTER INSERT OR DELETE ON detalle_debito FOR EACH ROW EXECUTE PROCEDURE nota_debito_iva();
+
+
+--
+-- TOC entry 2488 (class 2620 OID 63801)
+-- Name: trg_nota_debito_total; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_nota_debito_total AFTER INSERT OR DELETE ON detalle_debito FOR EACH ROW EXECUTE PROCEDURE nota_debito_total();
+
+
+--
+-- TOC entry 2489 (class 2620 OID 63802)
+-- Name: trg_orden_total; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_orden_total AFTER INSERT OR DELETE ON detalle_orden FOR EACH ROW EXECUTE PROCEDURE orden_total();
+
+
+--
+-- TOC entry 2480 (class 2620 OID 63803)
+-- Name: trg_stock; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_stock AFTER UPDATE ON compras FOR EACH ROW EXECUTE PROCEDURE compras_stock();
+
+
+--
+-- TOC entry 2490 (class 2620 OID 63804)
+-- Name: trgcredito_stock; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trgcredito_stock AFTER UPDATE ON nota_de_credito FOR EACH ROW EXECUTE PROCEDURE nota_credito_stock();
+
+
+--
+-- TOC entry 2456 (class 2606 OID 63805)
+-- Name: cargo_empleado_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_empleado
+    ADD CONSTRAINT cargo_empleado_fk FOREIGN KEY (id_cargo) REFERENCES ref_cargos(id_cargo);
+
+
+--
+-- TOC entry 2462 (class 2606 OID 63810)
+-- Name: ciudad_persona_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_persona
+    ADD CONSTRAINT ciudad_persona_fk FOREIGN KEY (id_ciudad) REFERENCES ref_ciudad(id_ciudad);
+
+
+--
+-- TOC entry 2419 (class 2606 OID 63815)
+-- Name: compras_compras_detalle_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras_detalle
+    ADD CONSTRAINT compras_compras_detalle_fk FOREIGN KEY (id_compra) REFERENCES compras(id_compra);
+
+
+--
+-- TOC entry 2423 (class 2606 OID 63820)
+-- Name: compras_ctas_pagar_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ctas_pagar
+    ADD CONSTRAINT compras_ctas_pagar_fk FOREIGN KEY (id_compra) REFERENCES compras(id_compra);
+
+
+--
+-- TOC entry 2436 (class 2606 OID 63825)
+-- Name: compras_libro_de_compra_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY libro_de_compra
+    ADD CONSTRAINT compras_libro_de_compra_fk FOREIGN KEY (id_compra) REFERENCES compras(id_compra);
+
+
+--
+-- TOC entry 2438 (class 2606 OID 63830)
+-- Name: compras_nota_de_credito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_de_credito
+    ADD CONSTRAINT compras_nota_de_credito_fk FOREIGN KEY (id_compra) REFERENCES compras(id_compra);
+
+
+--
+-- TOC entry 2442 (class 2606 OID 63835)
+-- Name: compras_nota_debito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_debito
+    ADD CONSTRAINT compras_nota_debito_fk FOREIGN KEY (id_compra) REFERENCES compras(id_compra);
+
+
+--
+-- TOC entry 2421 (class 2606 OID 63840)
+-- Name: dep_dpc_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras_pedidos_detalle
+    ADD CONSTRAINT dep_dpc_fk FOREIGN KEY (id_depo) REFERENCES ref_deposito(id_depo);
+
+
+--
+-- TOC entry 2472 (class 2606 OID 63845)
+-- Name: empleado_usuario_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_usuario
+    ADD CONSTRAINT empleado_usuario_fk FOREIGN KEY (id_empleado) REFERENCES ref_empleado(id_empleado);
+
+
+--
+-- TOC entry 2473 (class 2606 OID 63850)
+-- Name: grupo_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_usuario
+    ADD CONSTRAINT grupo_fk FOREIGN KEY (gru_cod) REFERENCES ref_grupos(gru_cod);
+
+
+--
+-- TOC entry 2460 (class 2606 OID 63855)
+-- Name: grupos_permisos_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_permisos
+    ADD CONSTRAINT grupos_permisos_fk FOREIGN KEY (gru_cod) REFERENCES ref_grupos(gru_cod);
+
+
+--
+-- TOC entry 2461 (class 2606 OID 63860)
+-- Name: interfaces_permisos_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_permisos
+    ADD CONSTRAINT interfaces_permisos_fk FOREIGN KEY (pag_cod) REFERENCES ref_paginas(pag_cod);
+
+
+--
+-- TOC entry 2464 (class 2606 OID 63865)
+-- Name: marca_productos_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_producto
+    ADD CONSTRAINT marca_productos_fk FOREIGN KEY (mar_cod) REFERENCES ref_marca(mar_cod);
+
+
+--
+-- TOC entry 2459 (class 2606 OID 63870)
+-- Name: modulos_interfaces_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_paginas
+    ADD CONSTRAINT modulos_interfaces_fk FOREIGN KEY (mod_cod) REFERENCES ref_modulos(mod_cod);
+
+
+--
+-- TOC entry 2411 (class 2606 OID 63875)
+-- Name: motivo_ajuste_ajuste_inventario_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ajustes
+    ADD CONSTRAINT motivo_ajuste_ajuste_inventario_fk FOREIGN KEY (id_majuste) REFERENCES motivo_ajuste(id_majuste);
+
+
+--
+-- TOC entry 2426 (class 2606 OID 63880)
+-- Name: motivo_detalle_debito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_debito
+    ADD CONSTRAINT motivo_detalle_debito_fk FOREIGN KEY (id_moti) REFERENCES motivo_nota(id_moti);
+
+
+--
+-- TOC entry 2439 (class 2606 OID 63885)
+-- Name: motivo_nota_nota_de_credito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_de_credito
+    ADD CONSTRAINT motivo_nota_nota_de_credito_fk FOREIGN KEY (id_moti) REFERENCES motivo_nota(id_moti);
+
+
+--
+-- TOC entry 2424 (class 2606 OID 63890)
+-- Name: nota_credito_detalle_credito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_credito
+    ADD CONSTRAINT nota_credito_detalle_credito_fk FOREIGN KEY (cod_notc) REFERENCES nota_de_credito(cod_notc);
+
+
+--
+-- TOC entry 2427 (class 2606 OID 63895)
+-- Name: nota_debito_detalle_debito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_debito
+    ADD CONSTRAINT nota_debito_detalle_debito_fk FOREIGN KEY (id_debito) REFERENCES nota_debito(id_debito);
+
+
+--
+-- TOC entry 2475 (class 2606 OID 63900)
+-- Name: nota_remision_nota_remision_detalle_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY remision_ndetalle
+    ADD CONSTRAINT nota_remision_nota_remision_detalle_fk FOREIGN KEY (id_remision) REFERENCES nota_remision(id_remision);
+
+
+--
+-- TOC entry 2430 (class 2606 OID 63905)
+-- Name: orden_de_compra_detalle_orden_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_orden
+    ADD CONSTRAINT orden_de_compra_detalle_orden_fk FOREIGN KEY (nro_orden) REFERENCES orden_de_compra(nro_orden);
+
+
+--
+-- TOC entry 2453 (class 2606 OID 63910)
+-- Name: pais_ciudad_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_ciudad
+    ADD CONSTRAINT pais_ciudad_fk FOREIGN KEY (id_pais) REFERENCES ref_pais(id_pais);
+
+
+--
+-- TOC entry 2454 (class 2606 OID 63915)
+-- Name: per_cli_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_cliente
+    ADD CONSTRAINT per_cli_fk FOREIGN KEY (id_persona) REFERENCES ref_persona(id_persona);
+
+
+--
+-- TOC entry 2457 (class 2606 OID 63920)
+-- Name: persona_empleado_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_empleado
+    ADD CONSTRAINT persona_empleado_fk FOREIGN KEY (id_persona) REFERENCES ref_persona(id_persona);
+
+
+--
+-- TOC entry 2433 (class 2606 OID 63925)
+-- Name: presupuesto_detalle_presupuesto_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_presupuesto
+    ADD CONSTRAINT presupuesto_detalle_presupuesto_fk FOREIGN KEY (id_presu) REFERENCES presupuesto(id_presu);
+
+
+--
+-- TOC entry 2422 (class 2606 OID 63930)
+-- Name: pro_dpc_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras_pedidos_detalle
+    ADD CONSTRAINT pro_dpc_fk FOREIGN KEY (pro_cod) REFERENCES ref_producto(pro_cod);
+
+
+--
+-- TOC entry 2465 (class 2606 OID 63935)
+-- Name: productos_id_um_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_producto
+    ADD CONSTRAINT productos_id_um_fkey FOREIGN KEY (id_um) REFERENCES ref_unidadmedida(id_um);
+
+
+--
+-- TOC entry 2468 (class 2606 OID 63940)
+-- Name: prv_ciudad_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_proveedor
+    ADD CONSTRAINT prv_ciudad_fk FOREIGN KEY (id_ciudad) REFERENCES ref_ciudad(id_ciudad);
+
+
+--
+-- TOC entry 2412 (class 2606 OID 63945)
+-- Name: ref_deposito_ajuste_inventario_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ajustes
+    ADD CONSTRAINT ref_deposito_ajuste_inventario_fk FOREIGN KEY (id_depo) REFERENCES ref_deposito(id_depo);
+
+
+--
+-- TOC entry 2428 (class 2606 OID 63950)
+-- Name: ref_deposito_detalle_debito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_debito
+    ADD CONSTRAINT ref_deposito_detalle_debito_fk FOREIGN KEY (id_depo) REFERENCES ref_deposito(id_depo);
+
+
+--
+-- TOC entry 2431 (class 2606 OID 63955)
+-- Name: ref_deposito_detalle_orden_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_orden
+    ADD CONSTRAINT ref_deposito_detalle_orden_fk FOREIGN KEY (id_depo) REFERENCES ref_deposito(id_depo);
+
+
+--
+-- TOC entry 2434 (class 2606 OID 63960)
+-- Name: ref_deposito_detalle_presupuesto_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_presupuesto
+    ADD CONSTRAINT ref_deposito_detalle_presupuesto_fk FOREIGN KEY (id_depo) REFERENCES ref_deposito(id_depo);
+
+
+--
+-- TOC entry 2455 (class 2606 OID 63965)
+-- Name: ref_deposito_id_sucursal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_deposito
+    ADD CONSTRAINT ref_deposito_id_sucursal_fkey FOREIGN KEY (id_sucursal) REFERENCES ref_sucursal(id_sucursal);
+
+
+--
+-- TOC entry 2469 (class 2606 OID 63970)
+-- Name: ref_deposito_ref_stock_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_stock
+    ADD CONSTRAINT ref_deposito_ref_stock_fk FOREIGN KEY (id_depo) REFERENCES ref_deposito(id_depo);
+
+
+--
+-- TOC entry 2445 (class 2606 OID 63975)
+-- Name: ref_empleado_nota_remision_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_remision
+    ADD CONSTRAINT ref_empleado_nota_remision_fk FOREIGN KEY (id_empleado) REFERENCES ref_empleado(id_empleado);
+
+
+--
+-- TOC entry 2415 (class 2606 OID 63980)
+-- Name: ref_ordenes_compras_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras
+    ADD CONSTRAINT ref_ordenes_compras_fk FOREIGN KEY (nro_orden) REFERENCES orden_de_compra(nro_orden);
+
+
+--
+-- TOC entry 2448 (class 2606 OID 63985)
+-- Name: ref_presupuesto_orden_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY orden_de_compra
+    ADD CONSTRAINT ref_presupuesto_orden_fk FOREIGN KEY (id_presu) REFERENCES presupuesto(id_presu);
+
+
+--
+-- TOC entry 2413 (class 2606 OID 63990)
+-- Name: ref_producto_ajuste_inventario_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ajustes
+    ADD CONSTRAINT ref_producto_ajuste_inventario_fk FOREIGN KEY (pro_cod) REFERENCES ref_producto(pro_cod);
+
+
+--
+-- TOC entry 2429 (class 2606 OID 63995)
+-- Name: ref_producto_detalle_debito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_debito
+    ADD CONSTRAINT ref_producto_detalle_debito_fk FOREIGN KEY (pro_cod) REFERENCES ref_producto(pro_cod);
+
+
+--
+-- TOC entry 2432 (class 2606 OID 64000)
+-- Name: ref_producto_detalle_orden_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_orden
+    ADD CONSTRAINT ref_producto_detalle_orden_fk FOREIGN KEY (pro_cod) REFERENCES ref_producto(pro_cod);
+
+
+--
+-- TOC entry 2435 (class 2606 OID 64005)
+-- Name: ref_producto_detalle_presupuesto_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_presupuesto
+    ADD CONSTRAINT ref_producto_detalle_presupuesto_fk FOREIGN KEY (pro_cod) REFERENCES ref_producto(pro_cod);
+
+
+--
+-- TOC entry 2470 (class 2606 OID 64010)
+-- Name: ref_producto_ref_stock_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_stock
+    ADD CONSTRAINT ref_producto_ref_stock_fk FOREIGN KEY (pro_cod) REFERENCES ref_producto(pro_cod);
+
+
+--
+-- TOC entry 2416 (class 2606 OID 64015)
+-- Name: ref_proveedor_compras_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras
+    ADD CONSTRAINT ref_proveedor_compras_fk FOREIGN KEY (prv_cod) REFERENCES ref_proveedor(prv_cod);
+
+
+--
+-- TOC entry 2437 (class 2606 OID 64020)
+-- Name: ref_proveedor_libro_de_compra_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY libro_de_compra
+    ADD CONSTRAINT ref_proveedor_libro_de_compra_fk FOREIGN KEY (prv_cod) REFERENCES ref_proveedor(prv_cod);
+
+
+--
+-- TOC entry 2440 (class 2606 OID 64025)
+-- Name: ref_proveedor_nota_de_credito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_de_credito
+    ADD CONSTRAINT ref_proveedor_nota_de_credito_fk FOREIGN KEY (prv_cod) REFERENCES ref_proveedor(prv_cod);
+
+
+--
+-- TOC entry 2443 (class 2606 OID 64030)
+-- Name: ref_proveedor_nota_debito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_debito
+    ADD CONSTRAINT ref_proveedor_nota_debito_fk FOREIGN KEY (prv_cod) REFERENCES ref_proveedor(prv_cod);
+
+
+--
+-- TOC entry 2449 (class 2606 OID 64035)
+-- Name: ref_proveedor_orden_de_pago_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY orden_de_compra
+    ADD CONSTRAINT ref_proveedor_orden_de_pago_fk FOREIGN KEY (prv_cod) REFERENCES ref_proveedor(prv_cod);
+
+
+--
+-- TOC entry 2451 (class 2606 OID 64040)
+-- Name: ref_proveedor_presupuesto_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY presupuesto
+    ADD CONSTRAINT ref_proveedor_presupuesto_fk FOREIGN KEY (prv_cod) REFERENCES ref_proveedor(prv_cod);
+
+
+--
+-- TOC entry 2425 (class 2606 OID 64045)
+-- Name: ref_stock_detalle_credito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY detalle_credito
+    ADD CONSTRAINT ref_stock_detalle_credito_fk FOREIGN KEY (pro_cod, id_depo) REFERENCES ref_stock(pro_cod, id_depo);
+
+
+--
+-- TOC entry 2417 (class 2606 OID 64050)
+-- Name: ref_sucursal_compras_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras
+    ADD CONSTRAINT ref_sucursal_compras_fk FOREIGN KEY (id_sucursal) REFERENCES ref_sucursal(id_sucursal);
+
+
+--
+-- TOC entry 2471 (class 2606 OID 64055)
+-- Name: ref_sucursal_id_ciudad_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_sucursal
+    ADD CONSTRAINT ref_sucursal_id_ciudad_fkey FOREIGN KEY (id_ciudad) REFERENCES ref_ciudad(id_ciudad);
+
+
+--
+-- TOC entry 2414 (class 2606 OID 64060)
+-- Name: ref_usuario_ajuste_inventario_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ajustes
+    ADD CONSTRAINT ref_usuario_ajuste_inventario_fk FOREIGN KEY (usu_cod) REFERENCES ref_usuario(usu_cod);
+
+
+--
+-- TOC entry 2418 (class 2606 OID 64065)
+-- Name: ref_usuario_compras_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras
+    ADD CONSTRAINT ref_usuario_compras_fk FOREIGN KEY (usu_cod) REFERENCES ref_usuario(usu_cod);
+
+
+--
+-- TOC entry 2446 (class 2606 OID 64070)
+-- Name: ref_usuario_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_remision
+    ADD CONSTRAINT ref_usuario_fk FOREIGN KEY (usu_cod) REFERENCES ref_usuario(usu_cod);
+
+
+--
+-- TOC entry 2441 (class 2606 OID 64075)
+-- Name: ref_usuario_nota_de_credito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_de_credito
+    ADD CONSTRAINT ref_usuario_nota_de_credito_fk FOREIGN KEY (usu_cod) REFERENCES ref_usuario(usu_cod);
+
+
+--
+-- TOC entry 2444 (class 2606 OID 64080)
+-- Name: ref_usuario_nota_debito_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_debito
+    ADD CONSTRAINT ref_usuario_nota_debito_fk FOREIGN KEY (usu_cod) REFERENCES ref_usuario(usu_cod);
+
+
+--
+-- TOC entry 2450 (class 2606 OID 64085)
+-- Name: ref_usuario_orden_de_compra_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY orden_de_compra
+    ADD CONSTRAINT ref_usuario_orden_de_compra_fk FOREIGN KEY (usu_cod) REFERENCES ref_usuario(usu_cod);
+
+
+--
+-- TOC entry 2452 (class 2606 OID 64090)
+-- Name: ref_usuario_presupuesto_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY presupuesto
+    ADD CONSTRAINT ref_usuario_presupuesto_fk FOREIGN KEY (usu_cod) REFERENCES ref_usuario(usu_cod);
+
+
+--
+-- TOC entry 2447 (class 2606 OID 64095)
+-- Name: ref_vehiculo_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY nota_remision
+    ADD CONSTRAINT ref_vehiculo_fk FOREIGN KEY (id_vehiculo) REFERENCES ref_vehiculo(id_vehiculo);
+
+
+--
+-- TOC entry 2476 (class 2606 OID 64100)
+-- Name: remision_ndetalle_cod_depo_destino_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY remision_ndetalle
+    ADD CONSTRAINT remision_ndetalle_cod_depo_destino_fkey FOREIGN KEY (cod_depo_destino) REFERENCES ref_deposito(id_depo);
+
+
+--
+-- TOC entry 2477 (class 2606 OID 64105)
+-- Name: stock_nota_remision_detalle_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY remision_ndetalle
+    ADD CONSTRAINT stock_nota_remision_detalle_fk FOREIGN KEY (pro_cod, id_depo) REFERENCES ref_stock(pro_cod, id_depo);
+
+
+--
+-- TOC entry 2458 (class 2606 OID 64110)
+-- Name: sucursal_empleado_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_empleado
+    ADD CONSTRAINT sucursal_empleado_fk FOREIGN KEY (id_sucursal) REFERENCES ref_sucursal(id_sucursal);
+
+
+--
+-- TOC entry 2474 (class 2606 OID 64115)
+-- Name: sucursal_usuario_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_usuario
+    ADD CONSTRAINT sucursal_usuario_fk FOREIGN KEY (id_sucursal) REFERENCES ref_sucursal(id_sucursal);
+
+
+--
+-- TOC entry 2463 (class 2606 OID 64120)
+-- Name: tipo_documento_persona_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_persona
+    ADD CONSTRAINT tipo_documento_persona_fk FOREIGN KEY (tipo_per_cod) REFERENCES ref_tipo_persona(id_tipper);
+
+
+--
+-- TOC entry 2466 (class 2606 OID 64125)
+-- Name: tipo_impuesto_productos_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_producto
+    ADD CONSTRAINT tipo_impuesto_productos_fk FOREIGN KEY (id_timp) REFERENCES ref_tipo_impuesto(id_timp);
+
+
+--
+-- TOC entry 2467 (class 2606 OID 64130)
+-- Name: tipo_producto; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ref_producto
+    ADD CONSTRAINT tipo_producto FOREIGN KEY (id_tipro) REFERENCES ref_tipo_producto(id_tipro);
+
+
+--
+-- TOC entry 2420 (class 2606 OID 64135)
+-- Name: usu_pedc_fk; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY compras_pedidos
+    ADD CONSTRAINT usu_pedc_fk FOREIGN KEY (usu_cod) REFERENCES ref_usuario(usu_cod);
+
+
+--
+-- TOC entry 2683 (class 0 OID 0)
+-- Dependencies: 7
+-- Name: public; Type: ACL; Schema: -; Owner: postgres
+--
+
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+REVOKE ALL ON SCHEMA public FROM postgres;
+GRANT ALL ON SCHEMA public TO postgres;
+GRANT ALL ON SCHEMA public TO PUBLIC;
+
+
+-- Completed on 2022-12-20 06:56:22
+
+--
+-- PostgreSQL database dump complete
+--
+
